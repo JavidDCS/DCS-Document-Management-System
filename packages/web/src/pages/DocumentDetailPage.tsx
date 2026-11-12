@@ -329,6 +329,7 @@ function UploadVersion({ doc, onDone }: { doc: DocumentDetail; onDone: () => voi
 
 function PreviewModal({ doc, version, onClose }: { doc: DocumentDetail; version: VersionDto; onClose: () => void }) {
   const [url, setUrl] = useState<string | null>(null);
+  const [blobData, setBlobData] = useState<Blob | null>(null);
   const [error, setError] = useState<unknown>(null);
 
   useEffect(() => {
@@ -338,7 +339,9 @@ function PreviewModal({ doc, version, onClose }: { doc: DocumentDetail; version:
       .blob(`/documents/${doc.id}/versions/${version.id}/content`, { inline: 1 })
       .then((r) => {
         if (!alive) return;
-        objectUrl = URL.createObjectURL(new Blob([r.blob], { type: 'application/pdf' }));
+        const pdfBlob = new Blob([r.blob], { type: 'application/pdf' });
+        objectUrl = URL.createObjectURL(pdfBlob);
+        setBlobData(pdfBlob);
         setUrl(objectUrl);
       })
       .catch((e) => alive && setError(e));
@@ -351,13 +354,44 @@ function PreviewModal({ doc, version, onClose }: { doc: DocumentDetail; version:
   return (
     <Modal title={`${doc.name} — v${version.versionNumber}`} onClose={onClose} wide>
       {error != null && <ErrorBanner error={error} />}
-      {!url && !error && <Spinner label="Preparing preview…" />}
+      {!url && !error && <Spinner label="Decrypting and verifying SHA-256…" />}
       {url && (
-        <>
-          {/* Sandboxed with no permissions: the file cannot run scripts or reach the app. If a browser refuses to render PDFs in a sandbox, use Download. */}
-          <iframe className="preview-frame" title={`Preview of ${version.originalFilename}`} src={url} sandbox="" referrerPolicy="no-referrer" />
-          <p className="muted mb-0 mt-3 text-xs">If the preview stays blank, your browser blocks PDFs in sandboxed frames. Use Download instead.</p>
-        </>
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-xs">
+            <div className="flex items-center gap-2 min-w-0">
+              <ShieldCheck className="size-4 text-success shrink-0" aria-hidden="true" />
+              <span className="truncate font-medium text-foreground">{version.originalFilename}</span>
+              <span className="muted shrink-0">({fmtSize(version.sizeBytes)})</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn small"
+              >
+                <Eye className="size-3.5" />
+                Open in new tab
+              </a>
+              {blobData && (
+                <button
+                  type="button"
+                  className="btn small primary"
+                  onClick={() => saveBlob(blobData, version.originalFilename)}
+                >
+                  <Download className="size-3.5" />
+                  Download
+                </button>
+              )}
+            </div>
+          </div>
+          <iframe
+            className="preview-frame"
+            title={`Preview of ${version.originalFilename}`}
+            src={url}
+            referrerPolicy="no-referrer"
+          />
+        </div>
       )}
     </Modal>
   );

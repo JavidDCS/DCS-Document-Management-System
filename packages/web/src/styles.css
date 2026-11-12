@@ -237,6 +237,8 @@
   .sidebar::after { content: ""; position: absolute; left: -60px; top: -60px; width: 220px; height: 220px; pointer-events: none; background: radial-gradient(circle, rgb(245 165 36 / .22), transparent 65%); }
   .sidebar > * { position: relative; z-index: 1; }
   .sidebar.open { @apply translate-x-0 shadow-pop; }
+  .sidebar nav { scrollbar-width: none; -ms-overflow-style: none; }
+  .sidebar nav::-webkit-scrollbar { display: none; }
   .shell.collapsed .sidebar { @apply lg:w-[72px]; }
   .shell-main { @apply flex min-h-full min-w-0 flex-1 flex-col lg:pl-64 transition-[padding] duration-200; }
   .shell.collapsed .shell-main { @apply lg:pl-[72px]; }
