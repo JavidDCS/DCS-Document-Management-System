@@ -1,0 +1,28 @@
+{
+  "name": "dcs-document-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DCS Document Management & Distribution Platform",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/shared",
+    "packages/api",
+    "packages/web"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/shared && npm run build -w packages/api && npm run build -w packages/web",
+    "typecheck": "npm run typecheck -w packages/shared && npm run typecheck -w packages/api && npm run typecheck -w packages/web",
+    "test": "npm run test -w packages/api",
+    "dev:api": "npm run dev -w packages/api",
+    "prisma:status": "npm run prisma:status -w packages/api",
+    "prisma:deploy": "npm run prisma:deploy -w packages/api",
+    "audit:verify": "npm run audit:verify -w packages/api",
+    "dev:web": "npm run dev -w packages/web",
+    "dev": "concurrently -n api,web -c blue,green --kill-others-on-fail \"npm:dev:api\" \"npm:dev:web\""
+  },
+  "devDependencies": {
+    "concurrently": "10.0.6"
+  }
+}

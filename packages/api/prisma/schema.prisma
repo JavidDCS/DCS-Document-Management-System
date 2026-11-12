@@ -1,0 +1,469 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Append-only, hash-chained audit log. Written ONLY by modules/audit (one writer, advisory-locked).
+/// UPDATE, DELETE and TRUNCATE are blocked by triggers (see migration). No FK to users on purpose:
+/// audit rows must outlive any user and must never be modified by a cascade or SET NULL.
+model AuditLog {
+  id           BigInt   @id @default(autoincrement())
+  occurredAt   DateTime @default(now()) @map("occurred_at") @db.Timestamptz(3)
+  actorUserId  String?  @map("actor_user_id") @db.Uuid
+  actorType    String   @map("actor_type")
+  action       String
+  resourceType String?  @map("resource_type")
+  resourceId   String?  @map("resource_id")
+  outcome      String   @default("SUCCESS")
+  ip           String?
+  userAgent    String?  @map("user_agent")
+  requestId    String?  @map("request_id")
+  details      Json     @default("{}")
+  hashVersion  Int      @default(1) @map("hash_version") @db.SmallInt
+  prevHash     String   @unique @map("prev_hash") @db.Char(64)
+  entryHash    String   @unique @map("entry_hash") @db.Char(64)
+
+  @@index([resourceType, resourceId])
+  @@index([actorUserId, occurredAt])
+  @@index([action, occurredAt])
+  @@index([occurredAt])
+  @@map("audit_logs")
+}
+
+/// Provider-neutral account. Credentials live in PasswordCredential, external identities (later) in their own table.
+/// Users are never hard-deleted: they are deactivated, so audit and history keep a valid reference.
+model User {
+  id          String    @id @default(uuid()) @db.Uuid
+  email       String    @unique // always lower-case (CHECK in SQL); domain enforced by the app (ALLOWED_EMAIL_DOMAIN)
+  name        String
+  status      String    @default("INVITED") // INVITED | ACTIVE | DEACTIVATED (CHECK in SQL)
+  createdById String?   @map("created_by_id") @db.Uuid
+  lastLoginAt DateTime? @map("last_login_at") @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  createdBy        User?                    @relation("UserCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdUsers     User[]                   @relation("UserCreator")
+  credential       PasswordCredential?
+  roles            UserRole[]               @relation("RoleOwner")
+  rolesGranted     UserRole[]               @relation("RoleGranter")
+  sessions         Session[]
+  loginEvents      LoginEvent[]
+  typesCreated     DocumentType[]           @relation("TypeCreator")
+  typesUpdated     DocumentType[]           @relation("TypeUpdater")
+  tagsCreated      Tag[]
+  documentsOwned   Document[]               @relation("DocumentOwner")
+  documentsCreated Document[]               @relation("DocumentCreator")
+  versionsUploaded DocumentVersion[]
+  ruleSubjects     DocumentAccessRule[]     @relation("RuleSubject")
+  rulesCreated     DocumentAccessRule[]     @relation("RuleCreator")
+  emailConnection  EmailProviderConnection?
+  emailOauthStates EmailOauthState[]
+  emailsSent       EmailMessage[]
+  templatesCreated EmailTemplate[]          @relation("TemplateCreator")
+  templatesUpdated EmailTemplate[]          @relation("TemplateUpdater")
+
+  @@index([createdById])
+  @@index([status])
+  @@map("users")
+}
+
+model PasswordCredential {
+  userId             String    @id @map("user_id") @db.Uuid
+  passwordHash       String    @map("password_hash") // bcrypt; never returned by any API, never logged
+  mustChangePassword Boolean   @default(true) @map("must_change_password")
+  passwordChangedAt  DateTime? @map("password_changed_at") @db.Timestamptz(3)
+  failedLoginCount   Int       @default(0) @map("failed_login_count")
+  lockedUntil        DateTime? @map("locked_until") @db.Timestamptz(3)
+  lastFailedAt       DateTime? @map("last_failed_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("password_credentials")
+}
+
+model UserRole {
+  userId      String   @map("user_id") @db.Uuid
+  role        String // SUPER_ADMIN | ADMIN | SENDER | VIEWER (CHECK in SQL)
+  grantedById String?  @map("granted_by_id") @db.Uuid
+  grantedAt   DateTime @default(now()) @map("granted_at") @db.Timestamptz(3)
+
+  user      User  @relation("RoleOwner", fields: [userId], references: [id], onDelete: Cascade)
+  grantedBy User? @relation("RoleGranter", fields: [grantedById], references: [id], onDelete: SetNull)
+
+  @@id([userId, role])
+  @@index([grantedById])
+  @@index([role])
+  @@map("user_roles")
+}
+
+/// One row per issued refresh token. Rotation revokes the old row and inserts a new one in the same family.
+model Session {
+  id                String    @id @default(uuid()) @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  familyId          String    @map("family_id") @db.Uuid
+  refreshTokenHash  String    @unique @map("refresh_token_hash") // sha-256 hex; the token itself is never stored
+  authMethod        String    @default("password") @map("auth_method")
+  authTime          DateTime  @map("auth_time") @db.Timestamptz(3) // last time the password was typed (re-authentication)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  lastUsedAt        DateTime  @default(now()) @map("last_used_at") @db.Timestamptz(3)
+  idleExpiresAt     DateTime  @map("idle_expires_at") @db.Timestamptz(3)
+  absoluteExpiresAt DateTime  @map("absolute_expires_at") @db.Timestamptz(3)
+  revokedAt         DateTime? @map("revoked_at") @db.Timestamptz(3)
+  revokedReason     String?   @map("revoked_reason") // ROTATED | LOGOUT | DEACTIVATED | PASSWORD_CHANGED | ADMIN_REVOKED | REUSE_DETECTED
+  ip                String?
+  userAgent         String?   @map("user_agent")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@map("sessions")
+}
+
+model LoginEvent {
+  id             BigInt   @id @default(autoincrement())
+  userId         String?  @map("user_id") @db.Uuid
+  emailAttempted String   @map("email_attempted")
+  method         String   @default("password")
+  outcome        String // SUCCESS | FAILED_CREDENTIALS | LOCKED | DENIED_INACTIVE | PASSWORD_CHANGED | REAUTH | REFRESH_REUSE
+  ip             String?
+  userAgent      String?  @map("user_agent")
+  requestId      String?  @map("request_id")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@index([emailAttempted, createdAt])
+  @@map("login_events")
+}
+
+/// Admin-defined at runtime. No document type is hardcoded or seeded. Types are deactivated, never deleted.
+model DocumentType {
+  id               String   @id @default(uuid()) @db.Uuid
+  key              String   @unique // slug generated from the name, immutable
+  name             String // unique case-insensitively (index in SQL)
+  description      String?
+  allowedMimeTypes String[] @default(["application/pdf"]) @map("allowed_mime_types")
+  maxFileSizeMb    Int      @default(25) @map("max_file_size_mb")
+  retentionYears   Int?     @map("retention_years")
+  isActive         Boolean  @default(true) @map("is_active")
+  fieldsVersion    Int      @default(1) @map("fields_version") // incremented on every field change
+  createdById      String?  @map("created_by_id") @db.Uuid
+  updatedById      String?  @map("updated_by_id") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  createdBy User?               @relation("TypeCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy User?               @relation("TypeUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+  fields    DocumentTypeField[]
+  documents Document[]
+
+  @@index([createdById])
+  @@index([updatedById])
+  @@index([isActive])
+  @@map("document_types")
+}
+
+/// One custom metadata field of a document type. Values live in documents.metadata (JSONB) keyed by `key`.
+model DocumentTypeField {
+  id             String   @id @default(uuid()) @db.Uuid
+  documentTypeId String   @map("document_type_id") @db.Uuid
+  key            String // immutable once the type has documents
+  label          String
+  fieldType      String   @map("field_type") // TEXT | TEXTAREA | NUMBER | DATE | BOOLEAN | SELECT | MULTI_SELECT (CHECK in SQL)
+  required       Boolean  @default(false)
+  helpText       String?  @map("help_text")
+  placeholder    String?
+  defaultValue   Json?    @map("default_value")
+  options        Json? // [{ value, label, isActive }]; options are deactivated, never removed
+  validation     Json? // per field type, see shared/metadata.ts
+  searchable     Boolean  @default(false)
+  displayOrder   Int      @default(0) @map("display_order")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  documentType DocumentType @relation(fields: [documentTypeId], references: [id], onDelete: Restrict)
+
+  @@unique([documentTypeId, key])
+  @@index([documentTypeId, displayOrder])
+  @@map("document_type_fields")
+}
+
+model Tag {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String // unique case-insensitively (index in SQL)
+  createdById String?  @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  createdBy User?         @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  documents DocumentTag[]
+
+  @@index([createdById])
+  @@map("tags")
+}
+
+/// A managed document. Content lives in immutable DocumentVersion rows; this row holds metadata and status.
+/// Separate statuses: isActive (Active/Inactive), the current version pointer (Current/Historical) and
+/// archiveStatus (LIVE/ARCHIVED/LEGAL_HOLD). Approval status arrives with the approvals feature.
+model Document {
+  id               String   @id @default(uuid()) @db.Uuid
+  documentTypeId   String   @map("document_type_id") @db.Uuid
+  name             String
+  description      String?
+  metadata         Json     @default("{}")
+  fieldsVersion    Int      @default(1) @map("fields_version") // version of the fields of the type that this metadata was validated against
+  searchText       String   @default("") @map("search_text") // searchable metadata values, for trigram search
+  isActive         Boolean  @default(false) @map("is_active") // may only be true while a CLEAN current version exists (CHECK + trigger)
+  archiveStatus    String   @default("LIVE") @map("archive_status") // LIVE | ARCHIVED | LEGAL_HOLD (CHECK in SQL)
+  currentVersionId String?  @map("current_version_id") @db.Uuid
+  ownerId          String   @map("owner_id") @db.Uuid
+  createdById      String   @map("created_by_id") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  documentType   DocumentType         @relation(fields: [documentTypeId], references: [id], onDelete: Restrict)
+  owner          User                 @relation("DocumentOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  createdBy      User                 @relation("DocumentCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  currentVersion DocumentVersion?     @relation("CurrentVersion", fields: [currentVersionId], references: [id], onDelete: Restrict)
+  versions       DocumentVersion[]    @relation("DocumentVersions")
+  tags           DocumentTag[]
+  accessRules    DocumentAccessRule[]
+  attachedTo     EmailAttachment[]
+
+  @@index([documentTypeId])
+  @@index([ownerId])
+  @@index([createdById])
+  @@index([currentVersionId])
+  @@index([isActive, archiveStatus])
+  @@index([updatedAt])
+  @@map("documents")
+}
+
+/// Immutable: a database trigger rejects DELETE and any UPDATE except the one-way scan result.
+model DocumentVersion {
+  id                    String    @id @default(uuid()) @db.Uuid
+  documentId            String    @map("document_id") @db.Uuid
+  versionNumber         Int       @map("version_number")
+  storageKey            String    @unique @map("storage_key") @db.Uuid // random; never derived from a filename
+  originalFilename      String    @map("original_filename") // display only, sanitised
+  mimeType              String    @map("mime_type")
+  sizeBytes             BigInt    @map("size_bytes") // plaintext size
+  storedSize            BigInt    @map("stored_size") // ciphertext size
+  sha256                String    @db.Char(64) // of the plaintext, verified on every read
+  encryptionKeyId       String    @map("encryption_key_id")
+  wrappedDataKey        Bytes     @map("wrapped_data_key")
+  scanStatus            String    @default("PENDING") @map("scan_status") // PENDING | CLEAN | QUARANTINED | REJECTED
+  scanDetails           Json?     @map("scan_details")
+  scannedAt             DateTime? @map("scanned_at") @db.Timestamptz(3)
+  changeNote            String?   @map("change_note")
+  restoredFromVersionId String?   @map("restored_from_version_id") @db.Uuid
+  uploadedById          String    @map("uploaded_by_id") @db.Uuid
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  document     Document          @relation("DocumentVersions", fields: [documentId], references: [id], onDelete: Restrict)
+  uploadedBy   User              @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+  restoredFrom DocumentVersion?  @relation("VersionRestore", fields: [restoredFromVersionId], references: [id], onDelete: Restrict)
+  restoredAs   DocumentVersion[] @relation("VersionRestore")
+  currentOf    Document[]        @relation("CurrentVersion")
+  attachedTo   EmailAttachment[]
+
+  @@unique([documentId, versionNumber])
+  @@index([documentId])
+  @@index([uploadedById])
+  @@index([restoredFromVersionId])
+  @@index([scanStatus])
+  @@map("document_versions")
+}
+
+model DocumentTag {
+  documentId String @map("document_id") @db.Uuid
+  tagId      String @map("tag_id") @db.Uuid
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  tag      Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([documentId, tagId])
+  @@index([tagId])
+  @@map("document_tags")
+}
+
+/// Object-level restrictions. No rule means the role permissions decide. Any ALLOW rule for a permission makes the
+/// document "only these users or roles" for that permission (SUPER_ADMIN always passes); DENY always wins.
+model DocumentAccessRule {
+  id          String   @id @default(uuid()) @db.Uuid
+  documentId  String   @map("document_id") @db.Uuid
+  subjectType String   @map("subject_type") // USER | ROLE
+  userId      String?  @map("user_id") @db.Uuid
+  role        String?
+  permission  String // VIEW | SEND
+  effect      String // ALLOW | DENY
+  createdById String?  @map("created_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  document  Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  user      User?    @relation("RuleSubject", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy User?    @relation("RuleCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([documentId])
+  @@index([userId])
+  @@index([createdById])
+  @@map("document_access_rules")
+}
+
+/// Postgres-backed job queue (retries with backoff, a lease for crash recovery, DEAD letter after the maximum attempts).
+model BackgroundJob {
+  id          String    @id @default(uuid()) @db.Uuid
+  type        String
+  payload     Json // ids only, never file content or secrets
+  dedupeKey   String    @unique @map("dedupe_key") // one row per business action; a repeated enqueue is a no-op
+  status      String    @default("PENDING") // PENDING | PROCESSING | DONE | DEAD
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+  availableAt DateTime  @default(now()) @map("available_at") @db.Timestamptz(3)
+  lockedUntil DateTime? @map("locked_until") @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  processedAt DateTime? @map("processed_at") @db.Timestamptz(3)
+
+  @@index([status, availableAt])
+  @@map("background_jobs")
+}
+
+/// Subject and body presets with a fixed list of safe placeholders. Sent emails store the rendered text, never a reference.
+model EmailTemplate {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String // unique case-insensitively (index in SQL)
+  subject     String
+  body        String
+  isDefault   Boolean  @default(false) @map("is_default")
+  isActive    Boolean  @default(true) @map("is_active")
+  version     Int      @default(1)
+  createdById String?  @map("created_by_id") @db.Uuid
+  updatedById String?  @map("updated_by_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  createdBy User?          @relation("TemplateCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy User?          @relation("TemplateUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+  messages  EmailMessage[]
+
+  @@index([createdById])
+  @@index([updatedById])
+  @@index([isActive])
+  @@map("email_templates")
+}
+
+/// One Gmail authorisation per user (scope gmail.send only), separate from login. The refresh token is encrypted.
+model EmailProviderConnection {
+  id                     String    @id @default(uuid()) @db.Uuid
+  userId                 String    @unique @map("user_id") @db.Uuid
+  provider               String    @default("gmail")
+  scopes                 String[]
+  refreshTokenCiphertext Bytes?    @map("refresh_token_ciphertext") // AES-256-GCM; wiped on revoke
+  keyId                  String    @map("key_id")
+  status                 String    @default("ACTIVE") // ACTIVE | REVOKED | ERROR
+  connectedAt            DateTime  @default(now()) @map("connected_at") @db.Timestamptz(3)
+  lastUsedAt             DateTime? @map("last_used_at") @db.Timestamptz(3)
+  revokedAt              DateTime? @map("revoked_at") @db.Timestamptz(3)
+
+  user     User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages EmailMessage[]
+
+  @@map("email_provider_connections")
+}
+
+/// Short-lived, single-use state for the Gmail consent flow (state is stored hashed; the PKCE verifier encrypted).
+model EmailOauthState {
+  id                     String   @id @default(uuid()) @db.Uuid
+  stateHash              String   @unique @map("state_hash")
+  userId                 String   @map("user_id") @db.Uuid
+  codeVerifierCiphertext Bytes    @map("code_verifier_ciphertext")
+  keyId                  String   @map("key_id")
+  expiresAt              DateTime @map("expires_at") @db.Timestamptz(3)
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("email_oauth_states")
+}
+
+/// Immutable record of exactly what was sent (triggers: no DELETE, content columns frozen, status moves forward only).
+model EmailMessage {
+  id                String    @id @default(uuid()) @db.Uuid
+  senderUserId      String    @map("sender_user_id") @db.Uuid
+  connectionId      String?   @map("connection_id") @db.Uuid
+  idempotencyKey    String    @map("idempotency_key")
+  requestHash       String    @map("request_hash") @db.Char(64) // same key + different content is refused
+  subject           String
+  bodyText          String    @map("body_text")
+  fromAddress       String    @map("from_address")
+  replyToAddress    String    @map("reply_to_address")
+  status            String    @default("QUEUED") // QUEUED | SENDING | SENT | FAILED | UNKNOWN
+  providerMessageId String?   @map("provider_message_id")
+  externalConfirmed Boolean   @default(false) @map("external_confirmed")
+  errorCode         String?   @map("error_code")
+  templateId        String?   @map("template_id") @db.Uuid
+  sentAt            DateTime? @map("sent_at") @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  sender      User                     @relation(fields: [senderUserId], references: [id], onDelete: Restrict)
+  connection  EmailProviderConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  template    EmailTemplate?           @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  recipients  EmailRecipient[]
+  attachments EmailAttachment[]
+
+  @@unique([senderUserId, idempotencyKey])
+  @@index([senderUserId, createdAt])
+  @@index([connectionId])
+  @@index([templateId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("email_messages")
+}
+
+model EmailRecipient {
+  id         String  @id @default(uuid()) @db.Uuid
+  messageId  String  @map("message_id") @db.Uuid
+  kind       String // TO | CC | BCC
+  address    String
+  domain     String
+  isExternal Boolean @map("is_external")
+
+  message EmailMessage @relation(fields: [messageId], references: [id], onDelete: Restrict)
+
+  @@unique([messageId, kind, address])
+  @@index([messageId])
+  @@index([address])
+  @@index([domain])
+  @@map("email_recipients")
+}
+
+model EmailAttachment {
+  id           String @id @default(uuid()) @db.Uuid
+  messageId    String @map("message_id") @db.Uuid
+  documentId   String @map("document_id") @db.Uuid
+  versionId    String @map("version_id") @db.Uuid
+  sha256AtSend String @map("sha256_at_send") @db.Char(64)
+  filenameSent String @map("filename_sent")
+  sizeBytes    BigInt @map("size_bytes")
+
+  message  EmailMessage    @relation(fields: [messageId], references: [id], onDelete: Restrict)
+  document Document        @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  version  DocumentVersion @relation(fields: [versionId], references: [id], onDelete: Restrict)
+
+  @@unique([messageId, versionId])
+  @@index([messageId])
+  @@index([documentId])
+  @@index([versionId])
+  @@map("email_attachments")
+}

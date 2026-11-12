@@ -1,0 +1,25 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# secrets: never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# local storage/quarantine used in development
+/storage/
+/quarantine/
+
+.DS_Store
+Thumbs.db
+*.log
+.claude/settings.local.json
+
+# Ignore all Markdown files except root README.md
+*.md
+!/README.md
+docs/
