@@ -41,6 +41,7 @@ function isBareOrigin(origin: string): boolean {
 export const envObject = z.object({
   // Server
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  APP_COMPANY_NAME: z.string().min(1).default('DeCircle Solar'),
   API_HOST: z.string().min(1).default('127.0.0.1'),
   API_PORT: intInRange(1, 65535, 7800),
   WEB_HOST: z.string().min(1).default('127.0.0.1'),
@@ -112,6 +113,14 @@ export const envObject = z.object({
     .regex(/^[A-Za-z0-9_-]+$/, 'REFRESH_COOKIE_NAME may only contain letters, digits, _ and -')
     .default('dcs_docs_refresh'),
   REAUTH_MAX_AGE_SECONDS: intInRange(30, 3600, 300),
+
+  // Google Workspace sign-in (OIDC Authorization Code + PKCE), an additional login method. Optional until configured.
+  AUTH_PASSWORD_LOGIN_ENABLED: flag(true),
+  AUTH_GOOGLE_LOGIN_ENABLED: flag(false),
+  GOOGLE_CLIENT_ID: optionalString,
+  GOOGLE_CLIENT_SECRET: optionalString,
+  // Optional: defaults to <APP_PUBLIC_URL or the web origin>/api/v1/auth/google/callback.
+  GOOGLE_REDIRECT_URI: z.preprocess(blankToUndefined, z.url().optional()),
 
   // First SUPER_ADMIN, used only by `npm run bootstrap:admin`
   SEED_SUPER_ADMIN_EMAIL: z.preprocess(blankToUndefined, z.string().trim().toLowerCase().pipe(z.email()).optional()),
@@ -252,6 +261,16 @@ export const envSchema = envObject.superRefine((e, ctx) => {
   const gmail = [e.GMAIL_OAUTH_CLIENT_ID, e.GMAIL_OAUTH_CLIENT_SECRET];
   if (gmail.some(Boolean) && !gmail.every(Boolean)) {
     fail('GMAIL_OAUTH_CLIENT_ID', 'GMAIL_OAUTH_CLIENT_ID and GMAIL_OAUTH_CLIENT_SECRET must be set together');
+  }
+  const google = [e.GOOGLE_CLIENT_ID, e.GOOGLE_CLIENT_SECRET];
+  if (google.some(Boolean) && !google.every(Boolean)) {
+    fail('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set together');
+  }
+  if (e.AUTH_GOOGLE_LOGIN_ENABLED && !google.every(Boolean)) {
+    fail('AUTH_GOOGLE_LOGIN_ENABLED', 'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required when AUTH_GOOGLE_LOGIN_ENABLED=true');
+  }
+  if (!e.AUTH_PASSWORD_LOGIN_ENABLED && !e.AUTH_GOOGLE_LOGIN_ENABLED) {
+    fail('AUTH_PASSWORD_LOGIN_ENABLED', 'At least one of AUTH_PASSWORD_LOGIN_ENABLED or AUTH_GOOGLE_LOGIN_ENABLED must be true');
   }
   if (e.EMAIL_TOKEN_ENCRYPTION_KEY === e.FILE_ENCRYPTION_MASTER_KEY) {
     fail('EMAIL_TOKEN_ENCRYPTION_KEY', 'EMAIL_TOKEN_ENCRYPTION_KEY must differ from FILE_ENCRYPTION_MASTER_KEY');

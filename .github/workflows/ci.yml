@@ -35,6 +35,15 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run typecheck
+      - name: No unsafe raw SQL in application code
+        # $queryRawUnsafe / $executeRawUnsafe bypass Prisma's parameter binding (SQL injection risk) if ever given
+        # untrusted input. The convention is Prisma.sql tagged templates only; test fixtures (DB setup/teardown on
+        # the test database) are the one documented exception and are not covered by this guard.
+        run: |
+          if grep -rn 'RawUnsafe' packages/api/src; then
+            echo "::error::\$queryRawUnsafe/\$executeRawUnsafe found in packages/api/src — use Prisma.sql tagged templates instead."
+            exit 1
+          fi
       - run: npm test
       - name: Dependency audit
         run: npm audit --audit-level=high
@@ -47,3 +56,12 @@ jobs:
           fetch-depth: 0
       - name: gitleaks
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.18.4 detect --source /repo --no-banner --redact
+
+  # Report-only for now (no --error): findings are visible in the Actions log but do not fail the build.
+  # Owner decision pending (docs/SECURITY-PLAN.md section 4) on when/whether to make this blocking.
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: semgrep (OWASP Top 10 + TypeScript rules, report-only)
+        run: docker run --rm -v "$PWD:/src" returntocorp/semgrep semgrep scan --config p/owasp-top-ten --config p/typescript /src

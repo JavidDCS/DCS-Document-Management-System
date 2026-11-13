@@ -376,6 +376,43 @@ export async function runDoctor() {
     pass(`EMAIL_TOKEN_ENCRYPTION_KEY valid`, `256-bit key`);
   }
 
+  // Google Workspace SSO Login OAuth check
+  const googleLoginEnabled = env.AUTH_GOOGLE_LOGIN_ENABLED === 'true';
+  const googleClientId = env.GOOGLE_CLIENT_ID || '';
+  const googleClientSecret = env.GOOGLE_CLIENT_SECRET || '';
+
+  if (googleLoginEnabled) {
+    if (!googleClientId || !googleClientSecret) {
+      fail(
+        'Google Workspace Login Misconfigured',
+        'AUTH_GOOGLE_LOGIN_ENABLED=true but GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is missing.',
+        'Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET from Google Cloud Console to your environment.'
+      );
+    } else {
+      pass(`Google Workspace Sign-In OAuth`, `Enabled & Configured`);
+    }
+  } else {
+    pass(`Google Workspace Sign-In OAuth`, `Disabled (password login active)`);
+  }
+
+  // Gmail Dispatch OAuth check
+  const gmailClientId = env.GMAIL_OAUTH_CLIENT_ID || '';
+  const gmailClientSecret = env.GMAIL_OAUTH_CLIENT_SECRET || '';
+
+  if (gmailClientId || gmailClientSecret) {
+    if (!gmailClientId || !gmailClientSecret) {
+      fail(
+        'Gmail Dispatch OAuth Misconfigured',
+        'GMAIL_OAUTH_CLIENT_ID and GMAIL_OAUTH_CLIENT_SECRET must be set together.',
+        'Provide both GMAIL_OAUTH_CLIENT_ID and GMAIL_OAUTH_CLIENT_SECRET in .env, or leave both empty.'
+      );
+    } else {
+      pass(`Gmail Mailbox Dispatch OAuth`, `Enabled & Configured (scope: gmail.send)`);
+    }
+  } else {
+    pass(`Gmail Mailbox Dispatch OAuth`, `Not configured (optional feature)`);
+  }
+
   // Production-Specific Compliance Rules
   if (isProduction) {
     // APP_PUBLIC_URL must be HTTPS

@@ -29,7 +29,8 @@ export function SendPage() {
   const [to, setTo] = useState<string[]>([]);
   const [cc, setCc] = useState<string[]>([]);
   const [bcc, setBcc] = useState<string[]>([]);
-  const [subject, setSubject] = useState('Documents from DeCircle Solar');
+  const companyName = (import.meta as any).env.VITE_COMPANY_NAME || 'DeCircle Solar';
+  const [subject, setSubject] = useState(`Documents from ${companyName}`);
   const [body, setBody] = useState(DEFAULT_BODY);
   const [templateId, setTemplateId] = useState('');
   const [preview, setPreview] = useState<DraftPreview | null>(null);

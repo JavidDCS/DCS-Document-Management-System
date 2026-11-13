@@ -32,6 +32,8 @@ export interface IssuedSession {
   /** Cookie lifetime: the absolute deadline of the session. */
   absoluteExpiresAt: Date;
   authTime: Date;
+  /** How this session was authenticated (e.g. "password", "google"); carried into the access token's amr claim. */
+  method: string;
 }
 
 export type RotateResult =
@@ -70,7 +72,7 @@ export class SessionService {
         userAgent: input.meta.userAgent?.slice(0, 255) ?? null,
       },
     });
-    return { sessionId: row.id, refreshToken, absoluteExpiresAt, authTime: input.authTime };
+    return { sessionId: row.id, refreshToken, absoluteExpiresAt, authTime: input.authTime, method: input.method };
   }
 
   /**

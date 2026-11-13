@@ -204,6 +204,7 @@ function Layout() {
     </NavLink>
   );
   const admin = canAny('users:read', 'doc_types:manage', 'templates:manage', 'audit:read', 'documents:manage');
+  const companyName = (import.meta as any).env.VITE_COMPANY_NAME || 'DeCircle Solar';
 
   return (
     <>
@@ -213,7 +214,7 @@ function Layout() {
         <aside id="sidebar" className={cn('sidebar', open && 'open')} aria-label="Main">
           <div className="flex h-16 items-center gap-3 px-4" style={{ borderBottom: '1px solid rgb(255 255 255 / .07)' }}>
             <span className="grid size-10 place-items-center rounded-xl bg-white shadow-lg"><Logo size={28} /></span>
-            <span className="brand-text leading-tight"><span className="font-display block text-[15px] font-semibold tracking-tight text-white">DeCircle Solar</span><span className="block text-[11px]" style={{ color: '#8ea0bd' }}>Documents</span></span>
+            <span className="brand-text leading-tight"><span className="font-display block text-[15px] font-semibold tracking-tight text-white">{companyName}</span><span className="block text-[11px]" style={{ color: '#8ea0bd' }}>Documents</span></span>
             <button className="btn ghost icon small ml-auto lg:hidden" onClick={() => setOpen(false)} aria-label="Close menu"><X className="size-4" /></button>
           </div>
           <nav className="flex-1 overflow-y-auto px-3 py-3" aria-label="Primary">

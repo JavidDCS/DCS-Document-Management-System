@@ -66,6 +66,7 @@ export function usePolling(active: boolean, tick: () => void, ms = 2000) {
 
 export function useTitle(title: string) {
   useEffect(() => {
-    document.title = `${title} · DCS Documents`;
+    const company = (import.meta as any).env.VITE_COMPANY_NAME || 'DeCircle Solar';
+    document.title = `${title} · ${company} Documents`;
   }, [title]);
 }

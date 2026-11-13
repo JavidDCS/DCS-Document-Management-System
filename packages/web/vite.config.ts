@@ -12,9 +12,26 @@ export default defineConfig(({ mode }) => {
   const host = env.WEB_HOST || '127.0.0.1';
   const port = Number(env.WEB_PORT || '7801');
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [
+      react(),
+      tailwindcss(),
+      {
+        name: 'html-transform',
+        transformIndexHtml(html) {
+          const company = env.APP_COMPANY_NAME || 'DeCircle Solar';
+          return html.replace(/<title>.*?<\/title>/, `<title>${company} Documents</title>`);
+        },
+      },
+    ],
     server: { host, port, strictPort: true, proxy: { '/api': { target: apiTarget, changeOrigin: false } } },
     preview: { host, port, strictPort: true, proxy: { '/api': { target: apiTarget, changeOrigin: false } } },
+    define: {
+      'import.meta.env.VITE_ALLOWED_EMAIL_DOMAIN': JSON.stringify(env.ALLOWED_EMAIL_DOMAIN || 'decirclesolar.com'),
+      'import.meta.env.VITE_COMPANY_NAME': JSON.stringify(env.APP_COMPANY_NAME || 'DeCircle Solar'),
+      'import.meta.env.VITE_APP_PUBLIC_URL': JSON.stringify(env.APP_PUBLIC_URL || ''),
+      'import.meta.env.VITE_AUTH_GOOGLE_LOGIN_ENABLED': JSON.stringify(env.AUTH_GOOGLE_LOGIN_ENABLED || 'false'),
+      'import.meta.env.VITE_AUTH_PASSWORD_LOGIN_ENABLED': JSON.stringify(env.AUTH_PASSWORD_LOGIN_ENABLED || 'true'),
+    },
     build: { sourcemap: false, target: 'es2022' },
     test: { environment: 'node', include: ['src/**/*.test.ts'] },
   };

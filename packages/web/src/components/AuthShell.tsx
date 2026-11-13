@@ -13,6 +13,7 @@ const LINES = ['Confidential by design.', 'Invitation-only access.', 'Scanned, e
 
 /** Split layout used by sign-in and forced password change: sunrise brand panel left, form right. */
 export function AuthShell({ children }: { children: ReactNode }) {
+  const companyName = (import.meta as any).env.VITE_COMPANY_NAME || 'DeCircle Solar';
   const [line, setLine] = useState(0);
   useEffect(() => {
     const t = setInterval(() => setLine((l) => (l + 1) % LINES.length), 3200);
@@ -24,7 +25,7 @@ export function AuthShell({ children }: { children: ReactNode }) {
       <aside className="hero relative hidden flex-col justify-between rounded-none p-12 lg:flex">
         <div className="flex items-center gap-3 text-lg font-semibold tracking-tight">
           <Logo size={38} />
-          <span className="font-display">DeCircle Solar</span>
+          <span className="font-display">{companyName}</span>
         </div>
 
         <div className="max-w-xl">
@@ -65,7 +66,7 @@ export function AuthShell({ children }: { children: ReactNode }) {
         <div className="w-full max-w-[420px] rounded-2xl border bg-card p-8 shadow-lift">
           <div className="mb-7 flex items-center gap-3 lg:hidden">
             <Logo size={36} />
-            <span className="font-display text-lg font-semibold tracking-tight">DeCircle Solar</span>
+            <span className="font-display text-lg font-semibold tracking-tight">{companyName}</span>
           </div>
           {children}
         </div>
