@@ -20,6 +20,11 @@ const optionalString = z.preprocess(blankToUndefined, z.string().optional());
 
 const PLACEHOLDER = /^change[-_ ]?me/i;
 
+/** The browser origin when CORS_ORIGIN is not set: the origin of APP_PUBLIC_URL, else http://WEB_HOST:WEB_PORT. */
+export function defaultOrigin(e: { APP_PUBLIC_URL?: string | undefined; WEB_HOST: string; WEB_PORT: number }): string {
+  return e.APP_PUBLIC_URL ? new URL(e.APP_PUBLIC_URL).origin : `http://${e.WEB_HOST}:${e.WEB_PORT}`;
+}
+
 export function parseOrigins(csv: string): string[] {
   return [...new Set(csv.split(',').map((o) => o.trim()).filter(Boolean))];
 }
@@ -76,7 +81,7 @@ export const envObject = z.object({
   ),
 
   // CORS: explicit origins only
-  // Comma-separated browser origins. When unset it is derived from WEB_HOST and WEB_PORT (http, so production must set it explicitly).
+  // Comma-separated browser origins. When unset: the origin of APP_PUBLIC_URL, else http://WEB_HOST:WEB_PORT.
   CORS_ORIGIN: z.preprocess(blankToUndefined, z.string().min(1).optional()),
   CSP_REPORT_URI: z.preprocess(blankToUndefined, z.url().optional()),
 
@@ -173,6 +178,7 @@ export const envObject = z.object({
   // Email: Gmail API with per-user OAuth (scope gmail.send only, separate from login). Optional until configured.
   GMAIL_OAUTH_CLIENT_ID: optionalString,
   GMAIL_OAUTH_CLIENT_SECRET: optionalString,
+  // Optional: defaults to <APP_PUBLIC_URL or the web origin>/api/v1/email/connection/callback, so it follows the ports and domain.
   GMAIL_OAUTH_REDIRECT_URI: z.preprocess(blankToUndefined, z.url().optional()),
   EMAIL_TOKEN_ENCRYPTION_KEY: z
     .string({ message: 'EMAIL_TOKEN_ENCRYPTION_KEY is required' })
@@ -243,15 +249,15 @@ export const envSchema = envObject.superRefine((e, ctx) => {
     fail('FILE_ENCRYPTION_PREVIOUS_KEYS', 'FILE_ENCRYPTION_PREVIOUS_KEYS must not reuse the current FILE_ENCRYPTION_KEY_ID');
   }
 
-  const gmail = [e.GMAIL_OAUTH_CLIENT_ID, e.GMAIL_OAUTH_CLIENT_SECRET, e.GMAIL_OAUTH_REDIRECT_URI];
+  const gmail = [e.GMAIL_OAUTH_CLIENT_ID, e.GMAIL_OAUTH_CLIENT_SECRET];
   if (gmail.some(Boolean) && !gmail.every(Boolean)) {
-    fail('GMAIL_OAUTH_CLIENT_ID', 'GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET and GMAIL_OAUTH_REDIRECT_URI must all be set together');
+    fail('GMAIL_OAUTH_CLIENT_ID', 'GMAIL_OAUTH_CLIENT_ID and GMAIL_OAUTH_CLIENT_SECRET must be set together');
   }
   if (e.EMAIL_TOKEN_ENCRYPTION_KEY === e.FILE_ENCRYPTION_MASTER_KEY) {
     fail('EMAIL_TOKEN_ENCRYPTION_KEY', 'EMAIL_TOKEN_ENCRYPTION_KEY must differ from FILE_ENCRYPTION_MASTER_KEY');
   }
 
-  const origins = parseOrigins(e.CORS_ORIGIN ?? `http://${e.WEB_HOST}:${e.WEB_PORT}`);
+  const origins = parseOrigins(e.CORS_ORIGIN ?? defaultOrigin(e));
   if (origins.length === 0) fail('CORS_ORIGIN', 'CORS_ORIGIN must list at least one origin');
   for (const o of origins) {
     if (o === '*') {

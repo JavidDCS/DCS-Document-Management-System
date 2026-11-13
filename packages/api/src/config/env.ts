@@ -1,6 +1,6 @@
 import { logger } from '../utils/logger.js';
 import { loadEnvFiles } from './envFiles.js';
-import { envSchema, parseOrigins } from './envSchema.js';
+import { defaultOrigin, envSchema, parseOrigins } from './envSchema.js';
 import { requireTestDatabaseUrl } from './testDatabase.js';
 
 /**
@@ -32,7 +32,7 @@ if (!parsed.success) {
 export const env = {
   ...parsed.data,
   COOKIE_SECURE: parsed.data.COOKIE_SECURE ?? parsed.data.NODE_ENV === 'production',
-  CORS_ORIGINS: parseOrigins(parsed.data.CORS_ORIGIN ?? `http://${parsed.data.WEB_HOST}:${parsed.data.WEB_PORT}`),
+  CORS_ORIGINS: parseOrigins(parsed.data.CORS_ORIGIN ?? defaultOrigin(parsed.data)),
 };
 
 export type Env = typeof env;

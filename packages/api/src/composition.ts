@@ -72,6 +72,7 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
   const documents = new DocumentsService(db, deps.files, documentTypes, cfg);
   const scan = new ScanService(db, deps.files, deps.scanner, cfg);
 
+  const publicUrl = (cfg.APP_PUBLIC_URL ?? cfg.CORS_ORIGINS[0]!).replace(/\/+$/, '');
   const emailKey = decodeMasterKey(cfg.EMAIL_TOKEN_ENCRYPTION_KEY);
   const secretBox = new SecretBox(emailKey);
   const emailProvider =
@@ -79,7 +80,7 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
     new GmailProvider({
       clientId: cfg.GMAIL_OAUTH_CLIENT_ID,
       clientSecret: cfg.GMAIL_OAUTH_CLIENT_SECRET,
-      redirectUri: cfg.GMAIL_OAUTH_REDIRECT_URI,
+      redirectUri: cfg.GMAIL_OAUTH_REDIRECT_URI ?? `${publicUrl}/api/v1/email/connection/callback`,
     });
   const emailConnections = new EmailConnectionsService(db, emailProvider, secretBox);
   const email = new EmailService(db, deps.files, documents, emailConnections, emailProvider, cfg, emailKey);
