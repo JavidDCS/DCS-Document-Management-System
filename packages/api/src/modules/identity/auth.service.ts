@@ -10,6 +10,7 @@ import {
 } from '@dcs-docs/shared';
 import { HttpError } from '../../utils/httpError.js';
 import { logger } from '../../utils/logger.js';
+import type { VerifiedIdentity } from '../../providers/identity/types.js';
 import { recordAudit } from '../audit/index.js';
 import { PasswordHasher } from './password.js';
 import type { ClientMeta, SessionService } from './session.service.js';
@@ -19,12 +20,24 @@ export interface AuthConfig {
   LOGIN_MAX_FAILED_ATTEMPTS: number;
   LOGIN_LOCKOUT_MINUTES: number;
   REAUTH_MAX_AGE_SECONDS: number;
+  ALLOWED_EMAIL_DOMAIN: string;
+  AUTH_PASSWORD_LOGIN_ENABLED: boolean;
 }
 
 const GENERIC_LOGIN_ERROR = 'Invalid email or password';
 const INVALID_SESSION = 'Session expired. Please sign in again.';
 
-type LoginOutcome = 'SUCCESS' | 'FAILED_CREDENTIALS' | 'LOCKED' | 'DENIED_INACTIVE' | 'PASSWORD_CHANGED' | 'REAUTH' | 'REFRESH_REUSE';
+type LoginOutcome =
+  | 'SUCCESS'
+  | 'FAILED_CREDENTIALS'
+  | 'LOCKED'
+  | 'DENIED_INACTIVE'
+  | 'PASSWORD_CHANGED'
+  | 'REAUTH'
+  | 'REFRESH_REUSE'
+  | 'DENIED_WRONG_DOMAIN'
+  | 'DENIED_NOT_INVITED'
+  | 'DENIED_INVALID_TOKEN';
 
 export interface AuthResult extends LoginResponse {
   refreshToken: string;
@@ -75,12 +88,14 @@ export class AuthService {
     outcome: LoginOutcome,
     email: string,
     userId: string | null,
-    meta: ClientMeta & { requestId?: string | undefined }
+    meta: ClientMeta & { requestId?: string | undefined },
+    method: string = 'password'
   ) {
     await tx.loginEvent.create({
       data: {
         userId,
         emailAttempted: email.slice(0, 254),
+        method,
         outcome,
         ip: meta.ip ?? null,
         userAgent: meta.userAgent?.slice(0, 255) ?? null,
@@ -131,6 +146,9 @@ export class AuthService {
   }
 
   async login(email: string, password: string, meta: ClientMeta & { requestId?: string }): Promise<AuthResult> {
+    if (!this.cfg.AUTH_PASSWORD_LOGIN_ENABLED) {
+      throw new HttpError(403, 'Password sign-in is disabled. Use Google sign-in.', 'PASSWORD_LOGIN_DISABLED');
+    }
     const user = await this.db.user.findUnique({ where: { email }, include: { credential: true, roles: true } });
 
     if (!user || !user.credential) {
@@ -173,19 +191,84 @@ export class AuthService {
     return this.result(toAuthUser({ ...user, lastLoginAt: now }, user.credential.mustChangePassword), issued, now);
   }
 
-  private result(user: AuthUser, issued: { sessionId: string; refreshToken: string; absoluteExpiresAt: Date; authTime: Date }, _now: Date): AuthResult {
+  private result(
+    user: AuthUser,
+    issued: { sessionId: string; refreshToken: string; absoluteExpiresAt: Date; authTime: Date; method: string },
+    _now: Date
+  ): AuthResult {
     return {
       user,
       accessToken: this.tokens.signAccess({
         userId: user.id,
         sessionId: issued.sessionId,
         authTime: Math.floor(issued.authTime.getTime() / 1000),
-        method: 'password',
+        method: issued.method,
       }),
       expiresIn: this.tokens.ttlSeconds,
       refreshToken: issued.refreshToken,
       refreshExpiresAt: issued.absoluteExpiresAt,
     };
+  }
+
+  /**
+   * Second login method: an externally-verified identity (today only Google Workspace OIDC). Invite-only — a user
+   * must already exist and be matched by verified email on first use, then only ever by the provider's stable
+   * subject id. Goes through the identical session/permission machinery as password login; no parallel logic.
+   */
+  async loginWithProvider(identity: VerifiedIdentity, meta: ClientMeta & { requestId?: string }): Promise<AuthResult> {
+    if (identity.hostedDomain !== this.cfg.ALLOWED_EMAIL_DOMAIN) {
+      await this.loginEvent(this.db, 'DENIED_WRONG_DOMAIN', identity.email, null, meta, identity.provider.toLowerCase());
+      await this.audit(this.db, 'LOGIN_FAILED', null, meta, 'DENIED', { reason: 'wrong_domain', provider: identity.provider });
+      throw new HttpError(401, 'This Google account is not part of the allowed organisation.', 'GOOGLE_WRONG_DOMAIN');
+    }
+
+    const linked = await this.db.identityAccount.findUnique({
+      where: { provider_subject: { provider: identity.provider, subject: identity.subject } },
+    });
+
+    let userId: string;
+    if (linked) {
+      userId = linked.userId;
+    } else {
+      const existing = await this.db.user.findUnique({ where: { email: identity.email }, select: { id: true, status: true } });
+      if (!existing) {
+        await this.loginEvent(this.db, 'DENIED_NOT_INVITED', identity.email, null, meta, identity.provider.toLowerCase());
+        await this.audit(this.db, 'LOGIN_FAILED', null, meta, 'DENIED', { reason: 'not_invited', provider: identity.provider });
+        throw new HttpError(401, 'No account is set up for this Google address. Ask an admin to invite you.', 'GOOGLE_NOT_INVITED');
+      }
+      // Checked before linking: a deactivated account's first Google attempt must not create a lasting link either.
+      if (existing.status === 'DEACTIVATED') {
+        await this.loginEvent(this.db, 'DENIED_INACTIVE', identity.email, existing.id, meta, identity.provider.toLowerCase());
+        await this.audit(this.db, 'LOGIN_FAILED', existing.id, meta, 'DENIED', { reason: 'deactivated', provider: identity.provider });
+        throw new HttpError(401, 'This account has been deactivated.', 'GOOGLE_DEACTIVATED');
+      }
+      userId = existing.id;
+      await this.db.$transaction(async (tx) => {
+        await tx.identityAccount.create({ data: { provider: identity.provider, subject: identity.subject, userId, email: identity.email } });
+        await this.audit(tx, 'IDENTITY_ACCOUNT_LINKED', userId, meta, 'SUCCESS', { provider: identity.provider });
+      });
+    }
+
+    const user = await this.db.user.findUnique({ where: { id: userId }, include: { credential: true, roles: true } });
+    if (!user) throw new HttpError(401, GENERIC_LOGIN_ERROR, 'UNAUTHENTICATED');
+
+    if (user.status === 'DEACTIVATED') {
+      await this.loginEvent(this.db, 'DENIED_INACTIVE', identity.email, user.id, meta, identity.provider.toLowerCase());
+      await this.audit(this.db, 'LOGIN_FAILED', user.id, meta, 'DENIED', { reason: 'deactivated', provider: identity.provider });
+      throw new HttpError(401, 'This account has been deactivated.', 'GOOGLE_DEACTIVATED');
+    }
+
+    const now = new Date();
+    const method = identity.provider.toLowerCase();
+    const issued = await this.db.$transaction(async (tx) => {
+      await tx.user.update({ where: { id: user.id }, data: { lastLoginAt: now, ...(user.status === 'INVITED' ? { status: 'ACTIVE' } : {}) } });
+      const s = await this.sessions.create(tx, { userId: user.id, method, authTime: now, meta });
+      await this.loginEvent(tx, 'SUCCESS', identity.email, user.id, meta, method);
+      await this.audit(tx, 'LOGIN_SUCCEEDED', user.id, meta, 'SUCCESS', { sessionId: s.sessionId, provider: identity.provider });
+      return s;
+    });
+
+    return this.result(toAuthUser({ ...user, lastLoginAt: now }, user.credential?.mustChangePassword ?? false), issued, now);
   }
 
   async refresh(refreshToken: string | undefined, meta: ClientMeta & { requestId?: string }): Promise<AuthResult> {

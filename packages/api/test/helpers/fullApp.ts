@@ -5,6 +5,7 @@ import { FileService } from '../../src/modules/storage/fileService.js';
 import { EnvKeyProvider } from '../../src/providers/keys/envKeyProvider.js';
 import type { StorageProvider } from '../../src/providers/storage/types.js';
 import type { EmailProvider } from '../../src/providers/email/types.js';
+import type { GoogleOidcProvider } from '../../src/providers/identity/googleOidc.js';
 import { FakeScanner } from './storage.js';
 import type { PrismaClient } from '@prisma/client';
 import request from 'supertest';
@@ -25,6 +26,8 @@ export const testConfig: ServicesConfig = {
   ...baseConfig,
   REQUEST_BODY_LIMIT_KB: 100,
   ALLOWED_EMAIL_DOMAIN: 'decirclesolar.com',
+  AUTH_PASSWORD_LOGIN_ENABLED: true,
+  AUTH_GOOGLE_LOGIN_ENABLED: false,
   LOGIN_MAX_FAILED_ATTEMPTS: 3,
   LOGIN_LOCKOUT_MINUTES: 15,
   JWT_ACCESS_SECRET: 'test-jwt-secret-test-jwt-secret-0123456789ab',
@@ -48,6 +51,7 @@ export interface TestDeps {
   files?: FileService;
   scanner?: MalwareScanner;
   emailProvider?: EmailProvider;
+  googleProvider?: GoogleOidcProvider;
 }
 
 export function buildFullApp(prisma: PrismaClient, overrides: Partial<ServicesConfig> = {}, deps: TestDeps = {}) {
@@ -57,6 +61,7 @@ export function buildFullApp(prisma: PrismaClient, overrides: Partial<ServicesCo
     scanner: deps.scanner ?? new FakeScanner(),
     ...(deps.usage ? { usage: deps.usage } : {}),
     ...(deps.emailProvider ? { emailProvider: deps.emailProvider } : {}),
+    ...(deps.googleProvider ? { googleProvider: deps.googleProvider } : {}),
   });
   const app = createApp({
     config: cfg,

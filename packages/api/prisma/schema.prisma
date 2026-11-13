@@ -66,6 +66,7 @@ model User {
   emailsSent       EmailMessage[]
   templatesCreated EmailTemplate[]          @relation("TemplateCreator")
   templatesUpdated EmailTemplate[]          @relation("TemplateUpdater")
+  identityAccounts IdentityAccount[]
 
   @@index([createdById])
   @@index([status])
@@ -84,6 +85,23 @@ model PasswordCredential {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("password_credentials")
+}
+
+/// Links a user to an external identity provider's stable subject id. Invite-only: a row is created only for a
+/// user that already exists (first successful login via that provider), never to auto-create an account.
+model IdentityAccount {
+  id        String   @id @default(uuid()) @db.Uuid
+  provider  String // GOOGLE (CHECK in SQL; room for others later)
+  subject   String // the provider's stable "sub" claim; never the email, which can change at the provider
+  userId    String   @map("user_id") @db.Uuid
+  email     String // the verified email at the time of linking, kept for audit display only
+  linkedAt  DateTime @default(now()) @map("linked_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, subject])
+  @@index([userId])
+  @@map("identity_accounts")
 }
 
 model UserRole {

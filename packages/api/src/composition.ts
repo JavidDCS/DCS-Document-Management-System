@@ -3,6 +3,7 @@ import type { AppConfig, AppContext } from './app.js';
 import { repoRoot } from './config/envFiles.js';
 import { AuthService, type AuthConfig } from './modules/identity/auth.service.js';
 import { registerIdentityRoutes } from './modules/identity/identity.routes.js';
+import { registerGoogleAuthRoutes } from './modules/identity/googleAuth.routes.js';
 import { PasswordHasher } from './modules/identity/password.js';
 import { SessionService, type SessionConfig } from './modules/identity/session.service.js';
 import { TokenService, type TokenConfig } from './modules/identity/tokens.js';
@@ -29,6 +30,7 @@ import { createAuthenticator } from './platform/auth/guards.js';
 import type { SecureRouter } from './platform/auth/secureRouter.js';
 import { GmailProvider } from './providers/email/gmail.js';
 import type { EmailProvider } from './providers/email/types.js';
+import { GoogleOidcProvider } from './providers/identity/googleOidc.js';
 import { EnvKeyProvider, decodeMasterKey, parseKeyList } from './providers/keys/envKeyProvider.js';
 import { createStorageProvider, type StorageEnv } from './providers/storage/factory.js';
 
@@ -42,6 +44,7 @@ export type ServicesConfig = AppConfig &
     BCRYPT_COST: number;
     REFRESH_COOKIE_NAME: string;
     ALLOWED_EMAIL_DOMAIN: string;
+    AUTH_PASSWORD_LOGIN_ENABLED: boolean;
     EMAIL_MAX_ATTACHMENT_TOTAL_MB: number;
     APP_TIMEZONE: string;
     EMAIL_TOKEN_ENCRYPTION_KEY: string;
@@ -49,6 +52,10 @@ export type ServicesConfig = AppConfig &
     GMAIL_OAUTH_CLIENT_ID?: string | undefined;
     GMAIL_OAUTH_CLIENT_SECRET?: string | undefined;
     GMAIL_OAUTH_REDIRECT_URI?: string | undefined;
+    AUTH_GOOGLE_LOGIN_ENABLED: boolean;
+    GOOGLE_CLIENT_ID?: string | undefined;
+    GOOGLE_CLIENT_SECRET?: string | undefined;
+    GOOGLE_REDIRECT_URI?: string | undefined;
   };
 
 export interface ServiceDeps {
@@ -57,6 +64,7 @@ export interface ServiceDeps {
   /** Overridable in tests; by default "has documents" is read from the documents table. */
   usage?: DocumentUsage;
   emailProvider?: EmailProvider;
+  googleProvider?: GoogleOidcProvider;
 }
 
 /** The composition root: the only place that wires concrete services together. */
@@ -89,6 +97,14 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
     await emailConnections.wipe(tx, userId, 'REVOKED');
   });
 
+  const googleProvider =
+    deps.googleProvider ??
+    new GoogleOidcProvider({
+      clientId: cfg.GOOGLE_CLIENT_ID,
+      clientSecret: cfg.GOOGLE_CLIENT_SECRET,
+      redirectUri: cfg.GOOGLE_REDIRECT_URI ?? `${publicUrl}/api/v1/auth/google/callback`,
+    });
+
   const jobs = new JobRunner(db, cfg)
     .register('scan_file', (job) => scan.handle(job))
     .register('send_email', (job) => email.handleSend(job))
@@ -112,6 +128,7 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
     email,
     emailConnections,
     emailProvider,
+    googleProvider,
   };
 }
 
@@ -122,6 +139,14 @@ export function registerRoutes(secure: SecureRouter, ctx: AppContext, svc: Servi
     auth: svc.auth,
     sessions: svc.sessions,
     cookie: { name: cfg.REFRESH_COOKIE_NAME, secure: cfg.COOKIE_SECURE },
+  });
+  registerGoogleAuthRoutes(secure, ctx, {
+    auth: svc.auth,
+    provider: svc.googleProvider,
+    enabled: cfg.AUTH_GOOGLE_LOGIN_ENABLED,
+    cookie: { name: cfg.REFRESH_COOKIE_NAME, secure: cfg.COOKIE_SECURE },
+    stateSecret: cfg.CSRF_SECRET,
+    appPublicUrl: cfg.APP_PUBLIC_URL ?? cfg.CORS_ORIGINS[0]!,
   });
   registerUserRoutes(secure, ctx, svc.users);
   registerDocumentTypeRoutes(secure, ctx, svc.documentTypes);
