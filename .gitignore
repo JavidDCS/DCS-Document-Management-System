@@ -19,7 +19,9 @@ Thumbs.db
 *.log
 .claude/settings.local.json
 
-# Ignore all Markdown files except root README.md
+# Ignore all Markdown files except root documentation and agent rules
 *.md
 !/README.md
+!/GEMINI.md
+!/AGENTS.md
 docs/
