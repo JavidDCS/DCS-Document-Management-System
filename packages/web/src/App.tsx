@@ -204,7 +204,8 @@ function Layout() {
     </NavLink>
   );
   const admin = canAny('users:read', 'doc_types:manage', 'templates:manage', 'audit:read', 'documents:manage');
-  const companyName = (import.meta as any).env.VITE_COMPANY_NAME || 'DeCircle Solar';
+  const appConfig = (typeof window !== 'undefined' && (window as any).__APP_CONFIG__) || {};
+  const companyName = appConfig.companyName || (import.meta as any).env.VITE_COMPANY_NAME || (import.meta as any).env.APP_COMPANY_NAME || 'DeCircle Solar';
 
   return (
     <>

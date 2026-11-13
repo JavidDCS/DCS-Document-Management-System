@@ -117,6 +117,8 @@ export const envObject = z.object({
   // Google Workspace sign-in (OIDC Authorization Code + PKCE), an additional login method. Optional until configured.
   AUTH_PASSWORD_LOGIN_ENABLED: flag(true),
   AUTH_GOOGLE_LOGIN_ENABLED: flag(false),
+  GOOGLE_LOGIN_ENABLED: z.preprocess(blankToUndefined, z.enum(['true', 'false']).optional()).transform((v) => v === 'true'),
+  ALLOWED_GOOGLE_DOMAINS: optionalString,
   GOOGLE_CLIENT_ID: optionalString,
   GOOGLE_CLIENT_SECRET: optionalString,
   // Optional: defaults to <APP_PUBLIC_URL or the web origin>/api/v1/auth/google/callback.
@@ -266,10 +268,11 @@ export const envSchema = envObject.superRefine((e, ctx) => {
   if (google.some(Boolean) && !google.every(Boolean)) {
     fail('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set together');
   }
-  if (e.AUTH_GOOGLE_LOGIN_ENABLED && !google.every(Boolean)) {
-    fail('AUTH_GOOGLE_LOGIN_ENABLED', 'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required when AUTH_GOOGLE_LOGIN_ENABLED=true');
+  const googleLoginActive = e.AUTH_GOOGLE_LOGIN_ENABLED || Boolean(e.GOOGLE_LOGIN_ENABLED);
+  if (googleLoginActive && !google.every(Boolean)) {
+    fail('AUTH_GOOGLE_LOGIN_ENABLED', 'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required when Google login is enabled');
   }
-  if (!e.AUTH_PASSWORD_LOGIN_ENABLED && !e.AUTH_GOOGLE_LOGIN_ENABLED) {
+  if (!e.AUTH_PASSWORD_LOGIN_ENABLED && !googleLoginActive) {
     fail('AUTH_PASSWORD_LOGIN_ENABLED', 'At least one of AUTH_PASSWORD_LOGIN_ENABLED or AUTH_GOOGLE_LOGIN_ENABLED must be true');
   }
   if (e.EMAIL_TOKEN_ENCRYPTION_KEY === e.FILE_ENCRYPTION_MASTER_KEY) {

@@ -18,10 +18,18 @@ function GoogleIcon(props: { className?: string }) {
   );
 }
 
-const companyName = (import.meta as any).env.VITE_COMPANY_NAME || 'DeCircle Solar';
-const domain = (import.meta as any).env.VITE_ALLOWED_EMAIL_DOMAIN || 'decirclesolar.com';
-const googleLoginEnabled = (import.meta as any).env.VITE_AUTH_GOOGLE_LOGIN_ENABLED === 'true';
-const passwordLoginEnabled = (import.meta as any).env.VITE_AUTH_PASSWORD_LOGIN_ENABLED !== 'false';
+const appConfig = (typeof window !== 'undefined' && (window as any).__APP_CONFIG__) || {};
+const companyName = appConfig.companyName || import.meta.env.VITE_COMPANY_NAME || import.meta.env.APP_COMPANY_NAME || 'DeCircle Solar';
+const domain = appConfig.domain || import.meta.env.VITE_ALLOWED_EMAIL_DOMAIN || import.meta.env.ALLOWED_EMAIL_DOMAIN || 'decirclesolar.com';
+const googleLoginEnabled =
+  appConfig.googleLoginEnabled ??
+  (import.meta.env.VITE_AUTH_GOOGLE_LOGIN_ENABLED === 'true' ||
+   import.meta.env.AUTH_GOOGLE_LOGIN_ENABLED === 'true' ||
+   import.meta.env.GOOGLE_LOGIN_ENABLED === 'true');
+const passwordLoginEnabled =
+  appConfig.passwordLoginEnabled ??
+  (import.meta.env.VITE_AUTH_PASSWORD_LOGIN_ENABLED !== 'false' &&
+   import.meta.env.AUTH_PASSWORD_LOGIN_ENABLED !== 'false');
 
 const GOOGLE_ERROR_MESSAGES: Record<string, string> = {
   wrong_domain: `This Google account is not part of ${companyName}. Sign in with your work Google account.`,

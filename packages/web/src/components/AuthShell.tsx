@@ -13,7 +13,8 @@ const LINES = ['Confidential by design.', 'Invitation-only access.', 'Scanned, e
 
 /** Split layout used by sign-in and forced password change: sunrise brand panel left, form right. */
 export function AuthShell({ children }: { children: ReactNode }) {
-  const companyName = (import.meta as any).env.VITE_COMPANY_NAME || 'DeCircle Solar';
+  const appConfig = (typeof window !== 'undefined' && (window as any).__APP_CONFIG__) || {};
+  const companyName = appConfig.companyName || (import.meta as any).env.VITE_COMPANY_NAME || (import.meta as any).env.APP_COMPANY_NAME || 'DeCircle Solar';
   const [line, setLine] = useState(0);
   useEffect(() => {
     const t = setInterval(() => setLine((l) => (l + 1) % LINES.length), 3200);

@@ -19,18 +19,36 @@ export default defineConfig(({ mode }) => {
         name: 'html-transform',
         transformIndexHtml(html) {
           const company = env.APP_COMPANY_NAME || 'DeCircle Solar';
-          return html.replace(/<title>.*?<\/title>/, `<title>${company} Documents</title>`);
+          const googleEnabled = env.AUTH_GOOGLE_LOGIN_ENABLED === 'true' || env.GOOGLE_LOGIN_ENABLED === 'true';
+          const passwordEnabled = env.AUTH_PASSWORD_LOGIN_ENABLED !== 'false';
+          const domain = env.ALLOWED_EMAIL_DOMAIN || 'decirclesolar.com';
+          const script = `<script>window.__APP_CONFIG__ = ${JSON.stringify({
+            companyName: company,
+            domain,
+            googleLoginEnabled: googleEnabled,
+            passwordLoginEnabled: passwordEnabled,
+          })};</script>`;
+          return html
+            .replace(/<title>.*?<\/title>/, `<title>${company} Documents</title>`)
+            .replace('</head>', `${script}</head>`);
         },
       },
     ],
     server: { host, port, strictPort: true, proxy: { '/api': { target: apiTarget, changeOrigin: false } } },
     preview: { host, port, strictPort: true, proxy: { '/api': { target: apiTarget, changeOrigin: false } } },
+    envDir: fileURLToPath(new URL('../..', import.meta.url)),
+    envPrefix: ['VITE_', 'AUTH_', 'GOOGLE_', 'APP_', 'ALLOWED_'],
     define: {
       'import.meta.env.VITE_ALLOWED_EMAIL_DOMAIN': JSON.stringify(env.ALLOWED_EMAIL_DOMAIN || 'decirclesolar.com'),
+      'import.meta.env.ALLOWED_EMAIL_DOMAIN': JSON.stringify(env.ALLOWED_EMAIL_DOMAIN || 'decirclesolar.com'),
       'import.meta.env.VITE_COMPANY_NAME': JSON.stringify(env.APP_COMPANY_NAME || 'DeCircle Solar'),
+      'import.meta.env.APP_COMPANY_NAME': JSON.stringify(env.APP_COMPANY_NAME || 'DeCircle Solar'),
       'import.meta.env.VITE_APP_PUBLIC_URL': JSON.stringify(env.APP_PUBLIC_URL || ''),
-      'import.meta.env.VITE_AUTH_GOOGLE_LOGIN_ENABLED': JSON.stringify(env.AUTH_GOOGLE_LOGIN_ENABLED || 'false'),
+      'import.meta.env.VITE_AUTH_GOOGLE_LOGIN_ENABLED': JSON.stringify(env.AUTH_GOOGLE_LOGIN_ENABLED || env.GOOGLE_LOGIN_ENABLED || 'false'),
+      'import.meta.env.AUTH_GOOGLE_LOGIN_ENABLED': JSON.stringify(env.AUTH_GOOGLE_LOGIN_ENABLED || env.GOOGLE_LOGIN_ENABLED || 'false'),
+      'import.meta.env.GOOGLE_LOGIN_ENABLED': JSON.stringify(env.AUTH_GOOGLE_LOGIN_ENABLED || env.GOOGLE_LOGIN_ENABLED || 'false'),
       'import.meta.env.VITE_AUTH_PASSWORD_LOGIN_ENABLED': JSON.stringify(env.AUTH_PASSWORD_LOGIN_ENABLED || 'true'),
+      'import.meta.env.AUTH_PASSWORD_LOGIN_ENABLED': JSON.stringify(env.AUTH_PASSWORD_LOGIN_ENABLED || 'true'),
     },
     build: { sourcemap: false, target: 'es2022' },
     test: { environment: 'node', include: ['src/**/*.test.ts'] },

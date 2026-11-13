@@ -377,7 +377,7 @@ export async function runDoctor() {
   }
 
   // Google Workspace SSO Login OAuth check
-  const googleLoginEnabled = env.AUTH_GOOGLE_LOGIN_ENABLED === 'true';
+  const googleLoginEnabled = env.AUTH_GOOGLE_LOGIN_ENABLED === 'true' || env.GOOGLE_LOGIN_ENABLED === 'true';
   const googleClientId = env.GOOGLE_CLIENT_ID || '';
   const googleClientSecret = env.GOOGLE_CLIENT_SECRET || '';
 

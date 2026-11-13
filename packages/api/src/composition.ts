@@ -143,7 +143,7 @@ export function registerRoutes(secure: SecureRouter, ctx: AppContext, svc: Servi
   registerGoogleAuthRoutes(secure, ctx, {
     auth: svc.auth,
     provider: svc.googleProvider,
-    enabled: cfg.AUTH_GOOGLE_LOGIN_ENABLED,
+    enabled: cfg.AUTH_GOOGLE_LOGIN_ENABLED || Boolean((cfg as any).GOOGLE_LOGIN_ENABLED),
     cookie: { name: cfg.REFRESH_COOKIE_NAME, secure: cfg.COOKIE_SECURE },
     stateSecret: cfg.CSRF_SECRET,
     appPublicUrl: cfg.APP_PUBLIC_URL ?? cfg.CORS_ORIGINS[0]!,
