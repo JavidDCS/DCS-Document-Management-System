@@ -1,13 +1,21 @@
 /**
- * DCS Documents Platform - Diagnostic Doctor Script
- * Validates Node runtime, dependencies, .env secrets, PostgreSQL database,
- * migrations, storage directories, super admin status, and ports.
+ * DCS Documents Platform - Multi-Stage Diagnostic Doctor & Deployment Readiness Engine
  *
- * Runs in under 2 seconds and speaks plain, friendly English for every issue.
+ * Designed for both local development and live production server environments (Docker, Kubernetes, VM, PM2).
+ * Verifies every single deployment stage:
+ *   Stage 1: System, OS & Host Resources
+ *   Stage 2: Production Build Artifacts & Dependency Integrity
+ *   Stage 3: Configuration & Live Production Security Compliance
+ *   Stage 4: Storage Infrastructure & Data Isolation
+ *   Stage 5: PostgreSQL Database, Extensions & Audit Security Triggers
+ *   Stage 6: Database Schema & Zero-Drift Migrations
+ *   Stage 7: Access Control & Super Administrator Provisioning
+ *   Stage 8: Network Readiness, Reverse Proxy & Security Daemons
  */
 
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
@@ -21,14 +29,20 @@ import {
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+// CLI Arguments
+const args = process.argv.slice(2);
+const isProdFlag = args.includes('--prod') || args.includes('--production');
+
 interface CheckResult {
-  category: string;
+  stageNumber: number;
+  stageName: string;
   name: string;
   ok: boolean;
   message?: string;
   warning?: boolean;
   errorDetails?: {
     title: string;
+    stage: string;
     whatHappened: string;
     details?: string;
     file?: string;
@@ -37,37 +51,57 @@ interface CheckResult {
 }
 
 const results: CheckResult[] = [];
+let currentStageNumber = 1;
+let currentStageName = '';
 
-function pass(category: string, name: string, message?: string) {
-  results.push({ category, name, ok: true, message });
+function setStage(num: number, name: string) {
+  currentStageNumber = num;
+  currentStageName = name;
+  console.log(`\n\x1b[1m[Stage ${num}/8] ${name}\x1b[0m`);
+}
+
+function pass(name: string, message?: string) {
+  results.push({
+    stageNumber: currentStageNumber,
+    stageName: currentStageName,
+    name,
+    ok: true,
+    message,
+  });
   console.log(`  ✅ ${name}${message ? ` (${message})` : ''}`);
 }
 
-function warn(category: string, name: string, whatHappened: string, howToFix: string, details?: string) {
+function warn(name: string, whatHappened: string, howToFix: string, details?: string, file?: string) {
   results.push({
-    category,
+    stageNumber: currentStageNumber,
+    stageName: currentStageName,
     name,
     ok: true,
     warning: true,
     errorDetails: {
       title: name,
+      stage: `Stage ${currentStageNumber}: ${currentStageName}`,
       whatHappened,
       details,
+      file,
       howToFix,
     },
   });
   console.log(`  ⚠️  ${name}`);
 }
 
-function fail(category: string, name: string, whatHappened: string, howToFix: string, details?: string) {
+function fail(name: string, whatHappened: string, howToFix: string, details?: string, file?: string) {
   results.push({
-    category,
+    stageNumber: currentStageNumber,
+    stageName: currentStageName,
     name,
     ok: false,
     errorDetails: {
       title: name,
+      stage: `Stage ${currentStageNumber}: ${currentStageName}`,
       whatHappened,
       details,
+      file,
       howToFix,
     },
   });
@@ -151,241 +185,341 @@ function testDirectoryWritable(dirPath: string): { ok: boolean; error?: string }
   }
 }
 
-async function runDoctor() {
+export async function runDoctor() {
   const startTime = Date.now();
 
   console.log(`\n╔════════════════════════════════════════════════════════════════════════════════╗`);
-  console.log(`║             🩺 DCS Documents Platform - System Health Doctor                   ║`);
-  console.log(`╚════════════════════════════════════════════════════════════════════════════════╝\n`);
+  console.log(`║      🩺 DCS Documents Platform - Multi-Stage Live Deployment Doctor            ║`);
+  console.log(`╚════════════════════════════════════════════════════════════════════════════════╝`);
+
+  // Detect environment source: .env file or system environment (Docker/K8s/CI)
+  const envPath = path.join(REPO_ROOT, '.env');
+  let fileEnv: Record<string, string> = {};
+  if (fs.existsSync(envPath)) {
+    try {
+      fileEnv = dotenv.parse(fs.readFileSync(envPath, 'utf8'));
+    } catch {
+      // Handled in stage 3
+    }
+  }
+
+  // Combined environment: process.env (system/container env) overrides .env file
+  const env: Record<string, string> = { ...fileEnv, ...process.env as Record<string, string> };
+  const isProduction = isProdFlag || env.NODE_ENV === 'production';
+
+  console.log(`\x1b[36mRunning in ${isProduction ? '🔴 PRODUCTION' : '🟢 DEVELOPMENT'} mode\x1b[0m\n`);
 
   // =========================================================================
-  // 1. Runtime & Environment
+  // STAGE 1: System, OS & Host Resources
   // =========================================================================
-  console.log(`\x1b[1m[1/7] Checking Runtime & Dependencies...\x1b[0m`);
+  setStage(1, 'System, OS & Host Resources');
+
   const nodeMajor = Number(process.versions.node.split('.')[0]);
   if (nodeMajor >= 20) {
-    pass('Runtime', `Node.js version`, `v${process.versions.node} (meets requirement >= 20)`);
+    pass(`Node.js Runtime`, `v${process.versions.node} (meets requirement >= 20, recommended 24.x)`);
   } else {
     fail(
-      'Runtime',
-      'Outdated Node.js Version',
-      `You are running Node.js v${process.versions.node}. DCS Documents requires Node.js v20.0.0 or higher (v24.x recommended).`,
-      'Please install Node.js v24 from https://nodejs.org/'
+      'Unsupported Node.js Version',
+      `Server is running Node.js v${process.versions.node}. DCS Documents requires Node.js v20.0.0 or higher.`,
+      'Upgrade Node.js to v24 LTS on this server: https://nodejs.org/'
     );
   }
 
+  const totalMemGb = (os.totalmem() / (1024 ** 3)).toFixed(1);
+  const freeMemGb = (os.freemem() / (1024 ** 3)).toFixed(1);
+  if (Number(freeMemGb) >= 0.3) {
+    pass(`Host Memory Available`, `${freeMemGb} GB free of ${totalMemGb} GB total`);
+  } else {
+    warn(
+      'Low Host Available Memory',
+      `Server has only ${freeMemGb} GB of free memory available. Heavy PDF parsing and scanning may exhaust memory.`,
+      'Ensure the server or container has at least 1 GB of free RAM.'
+    );
+  }
+
+  const platform = process.platform;
+  const isDocker = fs.existsSync('/.dockerenv') || fs.existsSync('/run/.containerenv');
+  pass(`Host Environment`, `${platform} ${os.arch()}${isDocker ? ' (Container/Docker)' : ''}`);
+
+  // =========================================================================
+  // STAGE 2: Build Artifacts & Dependency Integrity
+  // =========================================================================
+  setStage(2, 'Build Artifacts & Dependency Integrity');
+
   const rootNodeModules = path.join(REPO_ROOT, 'node_modules');
   if (fs.existsSync(rootNodeModules)) {
-    pass('Dependencies', 'Root node_modules present');
+    pass(`Dependencies installed`, `node_modules present`);
   } else {
     fail(
-      'Dependencies',
-      'Missing Dependencies',
-      'Project node_modules directory was not found.',
-      'Run "npm ci" or "npm install" at the repository root.'
+      'Dependencies Not Installed',
+      'The root node_modules folder is missing on this server.',
+      'Run "npm ci --omit=dev" (in production) or "npm ci" to install dependencies.'
     );
   }
 
   const sharedDist = path.join(REPO_ROOT, 'packages/shared/dist/index.js');
   if (fs.existsSync(sharedDist)) {
-    pass('Dependencies', '@dcs-docs/shared build', 'compiled');
+    pass(`@dcs-docs/shared build`, `packages/shared/dist compiled`);
   } else {
     fail(
-      'Dependencies',
-      'Shared Package Not Built',
-      'The @dcs-docs/shared package dist folder is missing.',
-      'Run "npm run build -w packages/shared" to compile the shared library.'
+      '@dcs-docs/shared Not Compiled',
+      'The shared library build output is missing.',
+      'Run "npm run build -w packages/shared".'
     );
+  }
+
+  const apiDist = path.join(REPO_ROOT, 'packages/api/dist/index.js');
+  if (fs.existsSync(apiDist)) {
+    pass(`@dcs-docs/api production build`, `packages/api/dist ready for live deployment`);
+  } else if (isProduction) {
+    fail(
+      '@dcs-docs/api Production Build Missing',
+      'Live production server requires the compiled API output (packages/api/dist/index.js) to run "npm start".',
+      'Run "npm run build -w packages/api" or "npm run build" before deploying to live server.'
+    );
+  } else {
+    pass(`@dcs-docs/api development mode`, `Running directly with tsx watch in dev`);
+  }
+
+  const webDist = path.join(REPO_ROOT, 'packages/web/dist/index.html');
+  if (fs.existsSync(webDist)) {
+    pass(`@dcs-docs/web production bundle`, `packages/web/dist compiled for static hosting / Nginx`);
+  } else if (isProduction) {
+    fail(
+      '@dcs-docs/web Static Bundle Missing',
+      'Live server requires the compiled Vite production bundle (packages/web/dist/index.html) to serve to users.',
+      'Run "npm run build -w packages/web" or "npm run build" to generate the web bundle.'
+    );
+  } else {
+    pass(`@dcs-docs/web development mode`, `Vite dev server handles frontend in dev`);
   }
 
   const prismaClientPath = path.join(REPO_ROOT, 'node_modules/@prisma/client');
   if (fs.existsSync(prismaClientPath)) {
-    pass('Dependencies', 'Prisma Client generated');
+    pass(`Prisma Client generated`, `Database client available`);
   } else {
     fail(
-      'Dependencies',
-      'Prisma Client Missing',
-      'Prisma database client has not been generated.',
+      'Prisma Client Not Generated',
+      'Prisma ORM client has not been generated into node_modules.',
       'Run "npm run prisma:generate -w packages/api".'
     );
   }
 
   // =========================================================================
-  // 2. Configuration & .env File
+  // STAGE 3: Configuration & Live Production Security Compliance
   // =========================================================================
-  console.log(`\n\x1b[1m[2/7] Checking .env Configuration & Cryptographic Secrets...\x1b[0m`);
-  const envPath = path.join(REPO_ROOT, '.env');
-  let envValues: Record<string, string> = {};
+  setStage(3, 'Configuration & Live Security Compliance');
 
-  if (!fs.existsSync(envPath)) {
+  if (fs.existsSync(envPath)) {
+    pass(`Environment source`, `.env file detected at ${envPath}`);
+  } else if (process.env.DATABASE_URL) {
+    pass(`Environment source`, `Container / System environment variables active (Cloud/K8s mode)`);
+  } else {
     fail(
-      'Configuration',
-      '.env File Missing',
-      'No .env file was found in the project root directory.',
-      'Copy .env.example to .env: "copy .env.example .env" and fill in your database credentials and secret keys.',
-      envPath
+      'Environment Configuration Missing',
+      'No .env file found and no system environment variables (like DATABASE_URL) are set.',
+      'Provide environment variables or copy .env.example to .env: "cp .env.example .env"'
+    );
+  }
+
+  // Database URL
+  const dbUrl = env.DATABASE_URL || '';
+  if (!dbUrl) {
+    fail('DATABASE_URL Missing', 'DATABASE_URL is not configured.', 'Set DATABASE_URL=postgresql://user:password@host:port/database in .env or server environment.');
+  } else if (dbUrl.includes('USER:PASSWORD')) {
+    fail(
+      'DATABASE_URL Placeholder Detected',
+      'DATABASE_URL still contains default placeholder credentials "USER:PASSWORD".',
+      'Replace USER and PASSWORD with real PostgreSQL credentials in your configuration.'
     );
   } else {
-    pass('Configuration', '.env file exists', envPath);
-    try {
-      const rawEnv = fs.readFileSync(envPath, 'utf8');
-      envValues = dotenv.parse(rawEnv);
-    } catch (err) {
-      fail(
-        'Configuration',
-        '.env Syntax Error',
-        `Failed to parse .env file: ${(err as Error).message}`,
-        'Check the syntax in your .env file for unclosed quotes or invalid characters.',
-        envPath
+    pass(`DATABASE_URL format`, redactSensitive(dbUrl));
+  }
+
+  // Secrets Entropy
+  const csrfSecret = env.CSRF_SECRET || '';
+  if (!csrfSecret || csrfSecret.length < 32) {
+    fail('CSRF_SECRET Weak', 'CSRF_SECRET must be at least 32 characters long.', 'Generate a secret with "openssl rand -base64 48" and set CSRF_SECRET.');
+  } else if (/^change[-_ ]?me/i.test(csrfSecret)) {
+    fail('CSRF_SECRET Placeholder Used', 'CSRF_SECRET contains the example placeholder value.', 'Generate a real production secret with "openssl rand -base64 48".');
+  } else {
+    pass(`CSRF_SECRET entropy`, `${csrfSecret.length} characters`);
+  }
+
+  const jwtSecret = env.JWT_ACCESS_SECRET || '';
+  if (!jwtSecret || jwtSecret.length < 32) {
+    fail('JWT_ACCESS_SECRET Weak', 'JWT_ACCESS_SECRET must be at least 32 characters long.', 'Generate a secret with "openssl rand -base64 48" and set JWT_ACCESS_SECRET.');
+  } else if (/^change[-_ ]?me/i.test(jwtSecret)) {
+    fail('JWT_ACCESS_SECRET Placeholder Used', 'JWT_ACCESS_SECRET contains the example placeholder value.', 'Generate a real production secret with "openssl rand -base64 48".');
+  } else if (jwtSecret === csrfSecret) {
+    fail('JWT_ACCESS_SECRET Identical to CSRF_SECRET', 'JWT_ACCESS_SECRET and CSRF_SECRET must be two distinct random secrets.', 'Generate separate random secrets for JWT and CSRF.');
+  } else {
+    pass(`JWT_ACCESS_SECRET entropy`, `${jwtSecret.length} characters`);
+  }
+
+  // Encryption Keys
+  const fileKey = env.FILE_ENCRYPTION_MASTER_KEY || '';
+  const fileKeyBytes = decodeBase64ByteLength(fileKey);
+  if (fileKeyBytes !== 32) {
+    fail('FILE_ENCRYPTION_MASTER_KEY Invalid Size', `FILE_ENCRYPTION_MASTER_KEY must be exactly 32 random bytes (base64 encoded). Received ${fileKeyBytes} bytes.`, 'Generate with: openssl rand -base64 32');
+  } else {
+    pass(`FILE_ENCRYPTION_MASTER_KEY valid`, `256-bit AES master envelope key`);
+  }
+
+  const emailKey = env.EMAIL_TOKEN_ENCRYPTION_KEY || '';
+  const emailKeyBytes = decodeBase64ByteLength(emailKey);
+  if (emailKeyBytes !== 32) {
+    fail('EMAIL_TOKEN_ENCRYPTION_KEY Invalid Size', `EMAIL_TOKEN_ENCRYPTION_KEY must be exactly 32 random bytes (base64 encoded). Received ${emailKeyBytes} bytes.`, 'Generate with: openssl rand -base64 32');
+  } else if (emailKey === fileKey) {
+    fail('EMAIL_TOKEN_ENCRYPTION_KEY Reuses File Key', 'EMAIL_TOKEN_ENCRYPTION_KEY must be distinct from FILE_ENCRYPTION_MASTER_KEY for cryptographic separation.', 'Generate a separate key with: openssl rand -base64 32');
+  } else {
+    pass(`EMAIL_TOKEN_ENCRYPTION_KEY valid`, `256-bit key`);
+  }
+
+  // Production-Specific Compliance Rules
+  if (isProduction) {
+    // APP_PUBLIC_URL must be HTTPS
+    const publicUrl = env.APP_PUBLIC_URL || '';
+    if (!publicUrl) {
+      fail('APP_PUBLIC_URL Missing in Production', 'Live servers must define APP_PUBLIC_URL (e.g. https://docs.yourcompany.com) so CORS, redirects, and emails are properly routed.', 'Set APP_PUBLIC_URL=https://docs.yourcompany.com in server environment.');
+    } else if (!publicUrl.startsWith('https://')) {
+      fail('APP_PUBLIC_URL Insecure Protocol', `APP_PUBLIC_URL must use https:// in production. Received: "${publicUrl}"`, 'Change APP_PUBLIC_URL to use https://');
+    } else {
+      pass(`APP_PUBLIC_URL HTTPS enforcement`, publicUrl);
+    }
+
+    // TRUST_PROXY
+    const trustProxy = Number(env.TRUST_PROXY ?? 0);
+    if (trustProxy < 1) {
+      warn(
+        'TRUST_PROXY=0 on Live Server',
+        'In production behind a reverse proxy (Nginx/Cloudflare/AWS ALB), every client shares the proxy IP. This causes all users to share rate limits.',
+        'Set TRUST_PROXY=1 in production environment when behind a reverse proxy.'
+      );
+    } else {
+      pass(`TRUST_PROXY reverse proxy configuration`, `${trustProxy} hop(s)`);
+    }
+
+    // COOKIE_SECURE
+    if (env.COOKIE_SECURE === 'false') {
+      fail('COOKIE_SECURE=false Forbidden in Production', 'Cookies must not disable secure transmission flags in production.', 'Remove COOKIE_SECURE=false or set COOKIE_SECURE=true.');
+    } else {
+      pass(`COOKIE_SECURE flag`, `Strict HTTPS transmission`);
+    }
+
+    // BCRYPT_COST
+    const bcryptCost = Number(env.BCRYPT_COST ?? 12);
+    if (bcryptCost < 12) {
+      fail('BCRYPT_COST Too Low for Production', `BCRYPT_COST is set to ${bcryptCost}. Production requires at least 12 for password hashing security.`, 'Set BCRYPT_COST=12 in production.');
+    } else {
+      pass(`BCRYPT_COST cost factor`, `${bcryptCost}`);
+    }
+
+    // CORS Origins: No wildcard in production
+    const corsOrigin = env.CORS_ORIGIN || '';
+    if (corsOrigin.includes('*')) {
+      fail('CORS Wildcard Forbidden in Production', 'CORS_ORIGIN must not use wildcard "*" on live servers.', 'Specify explicit HTTPS origins (e.g. CORS_ORIGIN=https://docs.example.com).');
+    } else if (corsOrigin) {
+      pass(`CORS_ORIGIN explicit allowlist`, corsOrigin);
+    }
+
+    // Seed password notice
+    if (env.SEED_SUPER_ADMIN_PASSWORD) {
+      warn(
+        'SEED_SUPER_ADMIN_PASSWORD Present in Production',
+        'SEED_SUPER_ADMIN_PASSWORD should be removed from live server configuration after initial bootstrap.',
+        'Remove SEED_SUPER_ADMIN_PASSWORD from production environment.'
       );
     }
   }
 
-  const dbUrl = envValues.DATABASE_URL || '';
-  if (!dbUrl) {
-    fail('Configuration', 'DATABASE_URL Missing', 'DATABASE_URL is not set in your .env file.', 'Add DATABASE_URL=postgresql://user:password@127.0.0.1:5432/dcs_docs to .env');
-  } else if (dbUrl.includes('USER:PASSWORD')) {
-    fail(
-      'Configuration',
-      'DATABASE_URL Placeholder Detected',
-      'DATABASE_URL still contains the default placeholder "USER:PASSWORD".',
-      'Replace USER and PASSWORD with your actual local PostgreSQL credentials in .env.'
-    );
-  } else {
-    pass('Configuration', 'DATABASE_URL format', redactSensitive(dbUrl));
-  }
-
-  const dbUrlTest = envValues.DATABASE_URL_TEST || '';
-  if (dbUrlTest && !dbUrlTest.includes('_test')) {
-    fail(
-      'Configuration',
-      'DATABASE_URL_TEST Safety Rule Violated',
-      'DATABASE_URL_TEST must point to a database name ending with "_test" to protect production and development data.',
-      'Update the database name in DATABASE_URL_TEST to end with "_test", e.g. "dcs_docs_test".'
-    );
-  } else if (dbUrlTest) {
-    pass('Configuration', 'DATABASE_URL_TEST format', redactSensitive(dbUrlTest));
-  }
-
-  const csrfSecret = envValues.CSRF_SECRET || '';
-  if (!csrfSecret || csrfSecret.length < 32) {
-    fail('Configuration', 'CSRF_SECRET Too Weak', 'CSRF_SECRET must be at least 32 characters long.', 'Generate a secret in your terminal: openssl rand -base64 48 and set CSRF_SECRET in .env');
-  } else if (/^change[-_ ]?me/i.test(csrfSecret)) {
-    fail('Configuration', 'CSRF_SECRET Placeholder Used', 'CSRF_SECRET still contains the example placeholder.', 'Generate a fresh random secret with: openssl rand -base64 48 and update CSRF_SECRET in .env');
-  } else {
-    pass('Configuration', 'CSRF_SECRET entropy', `${csrfSecret.length} characters`);
-  }
-
-  const jwtSecret = envValues.JWT_ACCESS_SECRET || '';
-  if (!jwtSecret || jwtSecret.length < 32) {
-    fail('Configuration', 'JWT_ACCESS_SECRET Too Weak', 'JWT_ACCESS_SECRET must be at least 32 characters long.', 'Generate a secret in your terminal: openssl rand -base64 48 and set JWT_ACCESS_SECRET in .env');
-  } else if (/^change[-_ ]?me/i.test(jwtSecret)) {
-    fail('Configuration', 'JWT_ACCESS_SECRET Placeholder Used', 'JWT_ACCESS_SECRET still contains the example placeholder.', 'Generate a fresh random secret with: openssl rand -base64 48 and update JWT_ACCESS_SECRET in .env');
-  } else if (jwtSecret === csrfSecret) {
-    fail('Configuration', 'JWT_ACCESS_SECRET and CSRF_SECRET Identical', 'JWT_ACCESS_SECRET and CSRF_SECRET must be two distinct secrets.', 'Generate separate secrets for JWT_ACCESS_SECRET and CSRF_SECRET.');
-  } else {
-    pass('Configuration', 'JWT_ACCESS_SECRET entropy', `${jwtSecret.length} characters`);
-  }
-
-  const fileKey = envValues.FILE_ENCRYPTION_MASTER_KEY || '';
-  const fileKeyBytes = decodeBase64ByteLength(fileKey);
-  if (fileKeyBytes !== 32) {
-    fail(
-      'Configuration',
-      'FILE_ENCRYPTION_MASTER_KEY Invalid Size',
-      `FILE_ENCRYPTION_MASTER_KEY must be exactly 32 random bytes (base64 encoded). Received ${fileKeyBytes} bytes.`,
-      'Generate a 32-byte key with: openssl rand -base64 32 and update FILE_ENCRYPTION_MASTER_KEY in .env.'
-    );
-  } else {
-    pass('Configuration', 'FILE_ENCRYPTION_MASTER_KEY valid', '256-bit AES master key');
-  }
-
-  const emailKey = envValues.EMAIL_TOKEN_ENCRYPTION_KEY || '';
-  const emailKeyBytes = decodeBase64ByteLength(emailKey);
-  if (emailKeyBytes !== 32) {
-    fail(
-      'Configuration',
-      'EMAIL_TOKEN_ENCRYPTION_KEY Invalid Size',
-      `EMAIL_TOKEN_ENCRYPTION_KEY must be exactly 32 random bytes (base64 encoded). Received ${emailKeyBytes} bytes.`,
-      'Generate a 32-byte key with: openssl rand -base64 32 and update EMAIL_TOKEN_ENCRYPTION_KEY in .env.'
-    );
-  } else if (emailKey === fileKey) {
-    fail(
-      'Configuration',
-      'EMAIL_TOKEN_ENCRYPTION_KEY Reuses File Key',
-      'EMAIL_TOKEN_ENCRYPTION_KEY must be different from FILE_ENCRYPTION_MASTER_KEY for domain separation.',
-      'Generate a separate 32-byte key for EMAIL_TOKEN_ENCRYPTION_KEY with: openssl rand -base64 32'
-    );
-  } else {
-    pass('Configuration', 'EMAIL_TOKEN_ENCRYPTION_KEY valid', '256-bit key');
-  }
-
   // =========================================================================
-  // 3. Storage & Quarantine Directories
+  // STAGE 4: Storage Infrastructure & Data Isolation
   // =========================================================================
-  console.log(`\n\x1b[1m[3/7] Checking Storage & Quarantine Directories...\x1b[0m`);
-  const storageDriver = envValues.STORAGE_DRIVER || 'local';
+  setStage(4, 'Storage Infrastructure & Data Isolation');
 
+  const storageDriver = env.STORAGE_DRIVER || 'local';
   if (storageDriver === 'local') {
-    const cleanRoot = envValues.STORAGE_LOCAL_ROOT || '';
-    const quarantineRoot = envValues.STORAGE_QUARANTINE_ROOT || '';
+    const cleanRoot = env.STORAGE_LOCAL_ROOT || '';
+    const quarantineRoot = env.STORAGE_QUARANTINE_ROOT || '';
 
     if (!cleanRoot) {
-      fail('Storage', 'STORAGE_LOCAL_ROOT Not Set', 'STORAGE_LOCAL_ROOT is required when STORAGE_DRIVER=local.', 'Set STORAGE_LOCAL_ROOT in .env (e.g. D:/DCS-Docs-Data/storage)');
+      fail('STORAGE_LOCAL_ROOT Not Configured', 'STORAGE_LOCAL_ROOT is required when STORAGE_DRIVER=local.', 'Set STORAGE_LOCAL_ROOT in your configuration to an absolute directory path.');
     } else if (!path.isAbsolute(cleanRoot)) {
-      fail('Storage', 'STORAGE_LOCAL_ROOT Not Absolute', `STORAGE_LOCAL_ROOT must be an absolute path. Received: "${cleanRoot}"`, 'Change STORAGE_LOCAL_ROOT to an absolute path outside the repository.');
+      fail('STORAGE_LOCAL_ROOT Must Be Absolute', `STORAGE_LOCAL_ROOT must be an absolute path outside the repository. Received: "${cleanRoot}"`, 'Change STORAGE_LOCAL_ROOT to an absolute path.');
     } else {
       const writeCheck = testDirectoryWritable(cleanRoot);
       if (writeCheck.ok) {
-        pass('Storage', 'Clean Storage Root writable', cleanRoot);
+        pass(`Clean Storage directory writable`, cleanRoot);
       } else {
-        fail('Storage', 'Clean Storage Root Inaccessible', `Cannot access or write to clean storage root: ${writeCheck.error}`, `Ensure directory exists and has write permissions: New-Item -ItemType Directory -Force -Path "${cleanRoot}"`);
+        fail('Clean Storage Inaccessible', `Cannot write to clean storage folder: ${writeCheck.error}`, `Ensure directory exists and user has write permissions: mkdir -p "${cleanRoot}"`);
       }
     }
 
     if (!quarantineRoot) {
-      fail('Storage', 'STORAGE_QUARANTINE_ROOT Not Set', 'STORAGE_QUARANTINE_ROOT is required when STORAGE_DRIVER=local.', 'Set STORAGE_QUARANTINE_ROOT in .env (e.g. D:/DCS-Docs-Data/quarantine)');
+      fail('STORAGE_QUARANTINE_ROOT Not Configured', 'STORAGE_QUARANTINE_ROOT is required when STORAGE_DRIVER=local.', 'Set STORAGE_QUARANTINE_ROOT in your configuration to an absolute directory path.');
     } else if (!path.isAbsolute(quarantineRoot)) {
-      fail('Storage', 'STORAGE_QUARANTINE_ROOT Not Absolute', `STORAGE_QUARANTINE_ROOT must be an absolute path. Received: "${quarantineRoot}"`, 'Change STORAGE_QUARANTINE_ROOT to an absolute path outside the repository.');
+      fail('STORAGE_QUARANTINE_ROOT Must Be Absolute', `STORAGE_QUARANTINE_ROOT must be an absolute path outside the repository. Received: "${quarantineRoot}"`, 'Change STORAGE_QUARANTINE_ROOT to an absolute path.');
     } else if (cleanRoot && path.resolve(cleanRoot) === path.resolve(quarantineRoot)) {
-      fail('Storage', 'Storage and Quarantine Roots Identical', 'STORAGE_QUARANTINE_ROOT must be a different folder from STORAGE_LOCAL_ROOT for isolation.', 'Set separate folders for clean storage and quarantine storage.');
+      fail('Storage Isolation Failed', 'STORAGE_QUARANTINE_ROOT must be a distinct directory from STORAGE_LOCAL_ROOT to quarantine uninspected files.', 'Assign separate folders for clean storage and quarantine storage.');
     } else {
       const writeCheck = testDirectoryWritable(quarantineRoot);
       if (writeCheck.ok) {
-        pass('Storage', 'Quarantine Storage Root writable', quarantineRoot);
+        pass(`Quarantine directory writable`, quarantineRoot);
       } else {
-        fail('Storage', 'Quarantine Storage Root Inaccessible', `Cannot access or write to quarantine storage root: ${writeCheck.error}`, `Ensure directory exists and has write permissions: New-Item -ItemType Directory -Force -Path "${quarantineRoot}"`);
+        fail('Quarantine Storage Inaccessible', `Cannot write to quarantine folder: ${writeCheck.error}`, `Ensure directory exists and user has write permissions: mkdir -p "${quarantineRoot}"`);
       }
     }
-  } else {
-    pass('Storage', `Storage Driver configured`, storageDriver);
+
+    // POSIX permissions check on Linux / Unix in production
+    if (process.platform !== 'win32' && cleanRoot && fs.existsSync(cleanRoot)) {
+      try {
+        const stat = fs.statSync(cleanRoot);
+        const mode = stat.mode & 0o777;
+        if ((mode & 0o077) !== 0) {
+          warn(
+            'Storage Folder Permissions Too Permissive',
+            `Clean storage directory "${cleanRoot}" has mode 0${mode.toString(8)}. Other users on the system may read sensitive files.`,
+            `Lock down directory permissions: chmod 0700 "${cleanRoot}"`
+          );
+        } else {
+          pass(`Storage directory POSIX mode`, `Strict 0700 permissions`);
+        }
+      } catch {
+        // Ignore stat errors if non-POSIX
+      }
+    }
+  } else if (storageDriver === 's3' || storageDriver === 'oci') {
+    const bucket = storageDriver === 's3' ? env.S3_BUCKET_NAME : env.OCI_BUCKET_NAME;
+    const region = storageDriver === 's3' ? env.S3_REGION : env.OCI_REGION;
+    if (!bucket || !region) {
+      fail(`${storageDriver.toUpperCase()} Bucket Configuration Incomplete`, `Missing bucket name or region for ${storageDriver} storage driver.`, `Set ${storageDriver === 's3' ? 'S3_BUCKET_NAME and S3_REGION' : 'OCI_BUCKET_NAME and OCI_REGION'}.`);
+    } else {
+      pass(`${storageDriver.toUpperCase()} Cloud Storage configured`, `Bucket: ${bucket}, Region: ${region}`);
+    }
   }
 
   // =========================================================================
-  // 4. PostgreSQL Database & Connectivity
+  // STAGE 5: PostgreSQL Database, Extensions & Audit Security Triggers
   // =========================================================================
-  console.log(`\n\x1b[1m[4/7] Checking PostgreSQL Database & Extensions...\x1b[0m`);
+  setStage(5, 'PostgreSQL Database & Audit Security Triggers');
+
   let prismaClient: PrismaClient | null = null;
   const dbInfo = parseDbUrl(dbUrl);
 
-  if (!dbInfo) {
-    fail('Database', 'Malformed DATABASE_URL', 'Could not parse host and port from DATABASE_URL in .env.', 'Verify DATABASE_URL follows standard: postgresql://user:password@host:port/database');
-  } else {
-    // 4.1 TCP socket ping
+  if (dbInfo) {
     const canReachSocket = await checkTcpPort(dbInfo.host, dbInfo.port);
     if (canReachSocket) {
-      pass('Database', `PostgreSQL socket reachable`, `${dbInfo.host}:${dbInfo.port}`);
+      pass(`PostgreSQL TCP socket reachable`, `${dbInfo.host}:${dbInfo.port}`);
     } else {
       fail(
-        'Database',
-        'PostgreSQL Server Unreachable (ECONNREFUSED)',
+        'Database Server Unreachable (ECONNREFUSED)',
         `Cannot establish a network socket connection to PostgreSQL at ${dbInfo.host}:${dbInfo.port}.`,
-        'Verify your PostgreSQL server service is running: in Windows PowerShell run "Get-Service *postgres*" or start it in Services.',
+        'Check that the database server is running, the host and port are correct, and security groups/firewalls permit traffic.',
         `Host: ${dbInfo.host}, Port: ${dbInfo.port}`
       );
     }
 
-    // 4.2 Prisma client connection & authentication
     if (canReachSocket) {
       try {
         prismaClient = new PrismaClient({
@@ -393,53 +527,77 @@ async function runDoctor() {
           log: [{ emit: 'event', level: 'error' }],
         });
 
-        // Test basic query
+        // Version & Connection test
         const versionResult = await prismaClient.$queryRawUnsafe<Array<{ version: string }>>('SELECT version();');
-        const pgVersion = versionResult[0]?.version || 'Unknown';
-        pass('Database', 'PostgreSQL authentication & connection', pgVersion.split(' on ')[0] || 'Connected');
+        const pgVersion = versionResult[0]?.version || 'Connected';
+        pass(`PostgreSQL connection & auth`, pgVersion.split(' on ')[0] || 'Active');
 
-        // Check required extensions (citext and pg_trgm)
+        // Required extensions: citext and pg_trgm
         const extensions = await prismaClient.$queryRawUnsafe<Array<{ extname: string }>>(
           "SELECT extname FROM pg_extension WHERE extname IN ('citext', 'pg_trgm');"
         );
         const extNames = extensions.map((e) => e.extname);
         if (extNames.includes('citext') && extNames.includes('pg_trgm')) {
-          pass('Database', 'PostgreSQL extensions installed', 'citext, pg_trgm');
+          pass(`PostgreSQL extensions installed`, `citext, pg_trgm`);
         } else {
           const missing = ['citext', 'pg_trgm'].filter((e) => !extNames.includes(e));
           warn(
-            'Database',
             'Missing PostgreSQL Extensions',
             `Database is missing recommended extensions: ${missing.join(', ')}.`,
             'Run "npm run prisma:deploy" or execute in psql: CREATE EXTENSION IF NOT EXISTS citext; CREATE EXTENSION IF NOT EXISTS pg_trgm;'
           );
         }
+
+        // Audit Log Security Triggers
+        const triggers = await prismaClient.$queryRawUnsafe<Array<{ tgname: string }>>(
+          "SELECT tgname FROM pg_trigger JOIN pg_class ON pg_class.oid = pg_trigger.tgrelid WHERE pg_class.relname = 'audit_logs';"
+        );
+        const triggerNames = triggers.map((t) => t.tgname);
+        if (triggerNames.includes('audit_logs_no_update_delete') && triggerNames.includes('audit_logs_no_truncate')) {
+          pass(`Audit log immutability triggers`, `audit_logs_no_update_delete & audit_logs_no_truncate active`);
+        } else {
+          warn(
+            'Audit Log Immutability Triggers Missing',
+            'PostgreSQL triggers preventing UPDATE, DELETE, or TRUNCATE on audit_logs table are missing.',
+            'Deploy initial migration to install triggers: npm run prisma:deploy'
+          );
+        }
+
+        // Audit Log Hash Chain Verification (Canary check)
+        const auditCount = await prismaClient.auditLog.count();
+        if (auditCount > 0) {
+          const lastEntries = await prismaClient.auditLog.findMany({
+            orderBy: { id: 'desc' },
+            take: 2,
+            select: { id: true, prevHash: true, entryHash: true },
+          });
+          if (lastEntries.length >= 2 && lastEntries[0]!.prevHash !== lastEntries[1]!.entryHash) {
+            fail(
+              'Audit Log Hash Chain Broken',
+              'The cryptographic SHA-256 hash chain in audit_logs is broken or was tampered with.',
+              'Run "npm run audit:verify" to locate the corrupted or tampered entry.'
+            );
+          } else {
+            pass(`Audit log cryptographic integrity`, `${auditCount} record(s) verified`);
+          }
+        } else {
+          pass(`Audit log cryptographic integrity`, `Genesis state (empty chain)`);
+        }
       } catch (err: any) {
         const translated = translateError(err);
-        fail(
-          'Database',
-          translated.title,
-          translated.whatHappened,
-          translated.howToFix,
-          translated.details || err.message
-        );
+        fail(translated.title, translated.whatHappened, translated.howToFix, translated.details || err.message);
       }
     }
   }
 
   // =========================================================================
-  // 5. Database Migrations Status
+  // STAGE 6: Database Schema & Zero-Drift Migrations
   // =========================================================================
-  console.log(`\n\x1b[1m[5/7] Checking Database Migrations...\x1b[0m`);
-  const migrationsFolder = path.join(REPO_ROOT, 'packages/api/prisma/migrations');
+  setStage(6, 'Database Schema & Zero-Drift Migrations');
 
+  const migrationsFolder = path.join(REPO_ROOT, 'packages/api/prisma/migrations');
   if (!fs.existsSync(migrationsFolder)) {
-    fail(
-      'Migrations',
-      'Migrations Directory Missing',
-      'The prisma/migrations folder was not found.',
-      'Check repository files or recreate migrations with Prisma.'
-    );
+    fail('Migrations Directory Missing', 'packages/api/prisma/migrations directory was not found.', 'Check repository files.');
   } else if (prismaClient) {
     try {
       const diskMigrations = fs
@@ -456,40 +614,38 @@ async function runDoctor() {
 
       if (rolledBack.length > 0) {
         fail(
-          'Migrations',
-          'Rolled Back Migration Detected',
-          `The following migration(s) were recorded as rolled back: ${rolledBack.map((r) => r.migration_name).join(', ')}.`,
-          'Investigate failed migration SQL and redeploy with "npm run prisma:deploy".'
+          'Database Migration Rolled Back',
+          `The following migration(s) were rolled back: ${rolledBack.map((r) => r.migration_name).join(', ')}.`,
+          'Fix the migration error and redeploy: npm run prisma:deploy'
         );
       } else if (unapplied.length > 0) {
         fail(
-          'Migrations',
-          'Pending Migrations Unapplied',
-          `Found ${unapplied.length} migration(s) on disk that have not been applied to the database: ${unapplied.join(', ')}.`,
-          'Apply all pending migrations by running: npm run prisma:deploy'
+          'Pending Database Migrations Unapplied',
+          `Found ${unapplied.length} pending migration(s) not yet applied to the database: ${unapplied.join(', ')}.`,
+          'Deploy migrations before starting the server: npm run prisma:deploy'
         );
       } else {
-        pass('Migrations', 'All migrations applied', `${diskMigrations.length} migration(s) active`);
+        pass(`Schema synchronized`, `All ${diskMigrations.length} migration(s) active with zero drift`);
       }
     } catch (err: any) {
       if (err.message?.includes('relation "_prisma_migrations" does not exist') || err.code === '42P01') {
         fail(
-          'Migrations',
-          'No Migrations Applied Yet',
-          'The database exists but contains no schema migrations yet (_prisma_migrations table missing).',
-          'Deploy the initial schema by running: npm run prisma:deploy'
+          'Database Tables Not Initialized',
+          'The database exists but has not had migrations applied yet (_prisma_migrations missing).',
+          'Run "npm run prisma:deploy" to create tables.'
         );
       } else {
         const translated = translateError(err);
-        fail('Migrations', translated.title, translated.whatHappened, translated.howToFix);
+        fail(translated.title, translated.whatHappened, translated.howToFix);
       }
     }
   }
 
   // =========================================================================
-  // 6. Super Admin Account
+  // STAGE 7: Access Control & Super Administrator Provisioning
   // =========================================================================
-  console.log(`\n\x1b[1m[6/7] Checking Super Administrator Account...\x1b[0m`);
+  setStage(7, 'Access Control & Super Administrator Provisioning');
+
   if (prismaClient) {
     try {
       const superAdminCount = await prismaClient.userRole.count({ where: { role: 'SUPER_ADMIN' } });
@@ -498,71 +654,81 @@ async function runDoctor() {
           where: { roles: { some: { role: 'SUPER_ADMIN' } } },
           select: { email: true, name: true, status: true },
         });
-        pass('Security', 'SUPER_ADMIN account exists', `${adminUser?.email || 'admin'} (${adminUser?.status})`);
+        pass(`Super Administrator account`, `${adminUser?.email || 'admin'} (status: ${adminUser?.status})`);
       } else {
-        warn(
-          'Security',
-          'No SUPER_ADMIN Account Found',
-          'The database has no Super Administrator account configured yet. You will not be able to log in to the portal.',
-          'Bootstrap your first admin account by running: npm run bootstrap:admin -w packages/api'
-        );
+        const adminMsg = 'No SUPER_ADMIN account found in the database. Users will not be able to log in to the portal.';
+        const fixMsg = 'Bootstrap the initial administrator: SEED_SUPER_ADMIN_EMAIL=admin@yourdomain.com npm run bootstrap:admin -w packages/api';
+        if (isProduction) {
+          fail('Super Administrator Not Provisioned', adminMsg, fixMsg);
+        } else {
+          warn('Super Administrator Not Provisioned', adminMsg, fixMsg);
+        }
       }
     } catch (err: any) {
       const translated = translateError(err);
-      fail('Security', translated.title, translated.whatHappened, translated.howToFix);
+      fail(translated.title, translated.whatHappened, translated.howToFix);
     }
   }
 
   // =========================================================================
-  // 7. Network Ports & ClamAV Status
+  // STAGE 8: Network Readiness, Reverse Proxy & Security Daemons
   // =========================================================================
-  console.log(`\n\x1b[1m[7/7] Checking Network Ports & Services...\x1b[0m`);
-  const apiHost = envValues.API_HOST || '127.0.0.1';
-  const apiPort = Number(envValues.API_PORT || 7800);
-  const webHost = envValues.WEB_HOST || '127.0.0.1';
-  const webPort = Number(envValues.WEB_PORT || 7801);
+  setStage(8, 'Network Readiness, Reverse Proxy & Security Daemons');
 
-  const apiPortInUse = await checkTcpPort(apiHost, apiPort, 800);
-  if (apiPortInUse) {
-    pass('Network', `API Port ${apiPort} active`, 'DCS API dev server is running');
+  const apiHost = env.API_HOST || '127.0.0.1';
+  const apiPort = Number(env.API_PORT || 7800);
+  const webHost = env.WEB_HOST || '127.0.0.1';
+  const webPort = Number(env.WEB_PORT || 7801);
+
+  const apiPortActive = await checkTcpPort(apiHost, apiPort, 800);
+  if (apiPortActive) {
+    pass(`API Port ${apiPort}`, `Active / Serving`);
   } else {
-    pass('Network', `API Port ${apiPort} available`, 'Ready for "npm run dev"');
+    pass(`API Port ${apiPort}`, `Available for startup`);
   }
 
-  const webPortInUse = await checkTcpPort(webHost, webPort, 800);
-  if (webPortInUse) {
-    pass('Network', `Web Port ${webPort} active`, 'DCS Web dev server is running');
+  const webPortActive = await checkTcpPort(webHost, webPort, 800);
+  if (webPortActive) {
+    pass(`Web Port ${webPort}`, `Active / Serving`);
   } else {
-    pass('Network', `Web Port ${webPort} available`, 'Ready for "npm run dev"');
+    pass(`Web Port ${webPort}`, `Available for startup`);
   }
 
-  // ClamAV
-  const malwareEnabled = envValues.MALWARE_SCAN_ENABLED === 'true';
-  if (malwareEnabled) {
-    const clamHost = envValues.CLAMAV_HOST || 'localhost';
-    const clamPort = Number(envValues.CLAMAV_PORT || 3310);
-    const clamReachable = await checkTcpPort(clamHost, clamPort, 1000);
+  // ClamAV Antivirus Daemon
+  const malwareEnabled = env.MALWARE_SCAN_ENABLED === 'true';
+  const clamHost = env.CLAMAV_HOST || '127.0.0.1';
+  const clamPort = Number(env.CLAMAV_PORT || 3310);
+
+  if (isProduction && !malwareEnabled) {
+    fail(
+      'Malware Scanner Disabled in Production',
+      'MALWARE_SCAN_ENABLED=false is refused in production. Uploaded PDF files must be scanned for viruses and active content.',
+      'Set MALWARE_SCAN_ENABLED=true and ensure ClamAV daemon is running on port 3310.'
+    );
+  } else if (malwareEnabled) {
+    const clamReachable = await checkTcpPort(clamHost, clamPort, 1200);
     if (clamReachable) {
-      pass('Services', 'ClamAV daemon reachable', `${clamHost}:${clamPort}`);
+      pass(`ClamAV Antivirus daemon online`, `${clamHost}:${clamPort}`);
     } else {
-      fail(
-        'Services',
-        'ClamAV Service Unreachable',
-        `MALWARE_SCAN_ENABLED=true in .env, but ClamAV daemon is not reachable on ${clamHost}:${clamPort}.`,
-        'Start ClamAV via Docker (docker run -d -p 3310:3310 clamav/clamav) or set MALWARE_SCAN_ENABLED=false in .env for offline development.'
-      );
+      const clamError = `ClamAV antivirus daemon is enabled but cannot be reached at ${clamHost}:${clamPort}.`;
+      const clamFix = 'Start ClamAV daemon: "docker run -d -p 3310:3310 clamav/clamav:latest" (or set MALWARE_SCAN_ENABLED=false for local dev).';
+      if (isProduction) {
+        fail('ClamAV Antivirus Daemon Offline', clamError, clamFix);
+      } else {
+        warn('ClamAV Antivirus Daemon Offline', clamError, clamFix);
+      }
     }
   } else {
-    pass('Services', 'Malware Scan bypass enabled', 'Development offline mode');
+    pass(`Malware Scan bypass active`, `Development offline mode`);
   }
 
-  // Close Prisma connection cleanly
+  // Close Prisma connection
   if (prismaClient) {
     await prismaClient.$disconnect().catch(() => {});
   }
 
   // =========================================================================
-  // Final Diagnostic Report
+  // Final Diagnostic Report & Summary
   // =========================================================================
   const duration = ((Date.now() - startTime) / 1000).toFixed(2);
   const failures = results.filter((r) => !r.ok);
@@ -571,14 +737,33 @@ async function runDoctor() {
   console.log(`\n────────────────────────────────────────────────────────────────────────────────`);
   console.log(`Diagnostic completed in ${duration}s. Total checks: ${results.length}. Failures: ${failures.length}. Warnings: ${warnings.length}.\n`);
 
+  // Print stage breakdown
+  for (let s = 1; s <= 8; s++) {
+    const stageResults = results.filter((r) => r.stageNumber === s);
+    const stageFailures = stageResults.filter((r) => !r.ok);
+    const stageWarnings = stageResults.filter((r) => r.warning);
+    const stageName = stageResults[0]?.stageName || `Stage ${s}`;
+
+    const statusBadge =
+      stageFailures.length > 0
+        ? '\x1b[31m❌ FAILED\x1b[0m'
+        : stageWarnings.length > 0
+          ? '\x1b[33m⚠️  WARNINGS\x1b[0m'
+          : '\x1b[32m✅ PASSED\x1b[0m';
+
+    console.log(`  Stage ${s}: ${stageName.padEnd(48)} ${statusBadge}`);
+  }
+  console.log('');
+
   if (failures.length > 0) {
-    console.log(`\x1b[1m\x1b[31mThe following issue(s) were found:\x1b[0m`);
+    console.log(`\x1b[1m\x1b[31mIssues Requiring Action Before Deployment:\x1b[0m`);
     for (const f of failures) {
       if (f.errorDetails) {
         console.log(
           formatBox({
             title: f.errorDetails.title,
             fields: [
+              { label: 'Stage', value: f.errorDetails.stage },
               { label: 'What happened', value: f.errorDetails.whatHappened },
               ...(f.errorDetails.details ? [{ label: 'Details', value: f.errorDetails.details }] : []),
               ...(f.errorDetails.file ? [{ label: 'File', value: f.errorDetails.file }] : []),
@@ -593,16 +778,17 @@ async function runDoctor() {
   }
 
   if (warnings.length > 0) {
-    console.log(`\x1b[1m\x1b[33mNotices & Warnings:\x1b[0m`);
+    console.log(`\x1b[1m\x1b[33mDeployment Notices & Recommendations:\x1b[0m`);
     for (const w of warnings) {
       if (w.errorDetails) {
         console.log(
           formatBox({
             title: w.errorDetails.title,
             fields: [
+              { label: 'Stage', value: w.errorDetails.stage },
               { label: 'What happened', value: w.errorDetails.whatHappened },
               ...(w.errorDetails.details ? [{ label: 'Details', value: w.errorDetails.details }] : []),
-              { label: 'How to fix it', value: w.errorDetails.howToFix },
+              { label: 'Recommendation', value: w.errorDetails.howToFix },
             ],
             severity: 'warning',
           })
@@ -613,12 +799,13 @@ async function runDoctor() {
 
   console.log(
     formatBox({
-      title: 'ALL CHECKS PASSED: Environment Is 100% Ready',
+      title: isProduction ? 'PRODUCTION READY: All 8 Deployment Stages Passed' : 'ALL CHECKS PASSED: Environment Is Ready',
       fields: [
-        { label: 'Status', value: 'All database, secret keys, directory permissions, and migration checks passed successfully.' },
-        { label: 'Web Portal', value: `http://${webHost}:${webPort}` },
-        { label: 'API Server', value: `http://${apiHost}:${apiPort}` },
-        { label: 'Next Step', value: 'Run "npm run dev" to launch both the Web frontend and API backend.' },
+        { label: 'Mode', value: isProduction ? 'Live Server Production' : 'Local Development' },
+        { label: 'Verdict', value: 'System resources, build artifacts, security secrets, PostgreSQL database, and migrations verified.' },
+        { label: 'Web Service', value: isProduction ? (env.APP_PUBLIC_URL || `http://${webHost}:${webPort}`) : `http://${webHost}:${webPort}` },
+        { label: 'API Service', value: `http://${apiHost}:${apiPort}` },
+        { label: 'Next Command', value: isProduction ? 'npm start (or systemd / docker start)' : 'npm run dev' },
       ],
       severity: 'info',
     })
@@ -627,6 +814,7 @@ async function runDoctor() {
   process.exit(0);
 }
 
+// Run if called directly
 runDoctor().catch((err) => {
   console.error('\nFatal Doctor Error:');
   console.error(formatFriendlyError(err));

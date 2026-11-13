@@ -16,6 +16,7 @@
     "audit:verify": "tsx scripts/verifyAudit.ts",
     "test": "vitest run",
     "check": "tsx ../../scripts/doctor.ts",
+    "check:prod": "tsx ../../scripts/doctor.ts --prod",
     "doctor": "tsx ../../scripts/doctor.ts",
     "bootstrap:admin": "tsx scripts/bootstrapAdmin.ts"
   },
