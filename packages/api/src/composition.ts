@@ -55,6 +55,9 @@ export type ServicesConfig = AppConfig &
     AUTH_GOOGLE_LOGIN_ENABLED: boolean;
     AUTH_GOOGLE_AUTO_PROVISION?: boolean | undefined;
     AUTH_GOOGLE_DEFAULT_ROLE?: 'VIEWER' | 'SENDER' | 'ADMIN' | undefined;
+    GOOGLE_LOGIN_ENABLED?: boolean | undefined;
+    GOOGLE_AUTO_PROVISION?: boolean | undefined;
+    GOOGLE_AUTO_PROVISION_DEFAULT_ROLE?: 'VIEWER' | 'SENDER' | 'ADMIN' | undefined;
     GOOGLE_CLIENT_ID?: string | undefined;
     GOOGLE_CLIENT_SECRET?: string | undefined;
     GOOGLE_REDIRECT_URI?: string | undefined;

@@ -120,6 +120,8 @@ export const envObject = z.object({
   AUTH_GOOGLE_AUTO_PROVISION: flag(false),
   AUTH_GOOGLE_DEFAULT_ROLE: z.enum(['VIEWER', 'SENDER', 'ADMIN']).default('VIEWER'),
   GOOGLE_LOGIN_ENABLED: z.preprocess(blankToUndefined, z.enum(['true', 'false']).optional()).transform((v) => v === 'true'),
+  GOOGLE_AUTO_PROVISION: z.preprocess(blankToUndefined, z.enum(['true', 'false']).optional()).transform((v) => v === 'true'),
+  GOOGLE_AUTO_PROVISION_DEFAULT_ROLE: z.preprocess(blankToUndefined, z.enum(['VIEWER', 'SENDER', 'ADMIN']).optional()),
   ALLOWED_GOOGLE_DOMAINS: optionalString,
   GOOGLE_CLIENT_ID: optionalString,
   GOOGLE_CLIENT_SECRET: optionalString,

@@ -389,8 +389,10 @@ export async function runDoctor() {
         'Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET from Google Cloud Console to your environment.'
       );
     } else {
-      const autoProv = env.AUTH_GOOGLE_AUTO_PROVISION === 'true'
-        ? ` (Auto-provision: ${env.AUTH_GOOGLE_DEFAULT_ROLE || 'VIEWER'})`
+      const isAutoProv = env.GOOGLE_AUTO_PROVISION === 'true' || env.AUTH_GOOGLE_AUTO_PROVISION === 'true';
+      const defaultRole = env.GOOGLE_AUTO_PROVISION_DEFAULT_ROLE || env.AUTH_GOOGLE_DEFAULT_ROLE || 'VIEWER';
+      const autoProv = isAutoProv
+        ? ` (Auto-provision: ${defaultRole})`
         : ' (Invite-only)';
       pass(`Google Workspace Sign-In OAuth`, `Enabled & Configured${autoProv}`);
     }

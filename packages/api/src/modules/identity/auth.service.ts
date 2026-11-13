@@ -24,6 +24,8 @@ export interface AuthConfig {
   AUTH_PASSWORD_LOGIN_ENABLED: boolean;
   AUTH_GOOGLE_AUTO_PROVISION?: boolean | undefined;
   AUTH_GOOGLE_DEFAULT_ROLE?: 'VIEWER' | 'SENDER' | 'ADMIN' | undefined;
+  GOOGLE_AUTO_PROVISION?: boolean | undefined;
+  GOOGLE_AUTO_PROVISION_DEFAULT_ROLE?: 'VIEWER' | 'SENDER' | 'ADMIN' | undefined;
   ALLOWED_GOOGLE_DOMAINS?: string | undefined;
 }
 
@@ -243,8 +245,9 @@ export class AuthService {
     } else {
       let existing = await this.db.user.findUnique({ where: { email: identity.email }, select: { id: true, status: true } });
       if (!existing) {
-        if (this.cfg.AUTH_GOOGLE_AUTO_PROVISION) {
-          const defaultRole = this.cfg.AUTH_GOOGLE_DEFAULT_ROLE || 'VIEWER';
+        const isAutoProvision = Boolean(this.cfg.GOOGLE_AUTO_PROVISION || this.cfg.AUTH_GOOGLE_AUTO_PROVISION);
+        if (isAutoProvision) {
+          const defaultRole = this.cfg.GOOGLE_AUTO_PROVISION_DEFAULT_ROLE ?? this.cfg.AUTH_GOOGLE_DEFAULT_ROLE ?? 'VIEWER';
           const displayName = identity.name?.trim() || identity.email.split('@')[0];
           existing = await this.db.$transaction(async (tx) => {
             const created = await tx.user.create({

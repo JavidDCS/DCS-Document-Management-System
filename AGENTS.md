@@ -4,8 +4,8 @@
 
 - **Sequential Numbering**: Whenever committing any changes locally or pushing to GitHub, you **MUST ALWAYS** include an order-wise sequential number in parentheses at the end of the commit subject line: `(#N)`.
 - **Current Sequence**:
-  - The next commit **MUST** be: `(#21)`
-  - Following commits must increment sequentially: `(#22)`, `(#23)`, `(#24)`, etc.
+  - The next commit **MUST** be: `(#22)`
+  - Following commits must increment sequentially: `(#23)`, `(#24)`, `(#25)`, etc.
 - **Format**:
   Follow Conventional Commits syntax with the sequential hashtag at the end:
   ```

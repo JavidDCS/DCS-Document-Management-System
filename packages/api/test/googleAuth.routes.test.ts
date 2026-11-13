@@ -138,6 +138,23 @@ describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
     expect(created?.roles.map((r) => r.role)).toEqual(['VIEWER']);
   });
 
+  it('auto-provisions with custom role when GOOGLE_AUTO_PROVISION and GOOGLE_AUTO_PROVISION_DEFAULT_ROLE are used', async () => {
+    const email = uniqueEmail('auto-prov-sender');
+    const app = buildApp(
+      async () => ({ sub: 'sub-auto-sender', email, email_verified: true, hd: 'decirclesolar.com', name: 'Sender User', nonce: 'nonce-1' }),
+      { GOOGLE_AUTO_PROVISION: true, GOOGLE_AUTO_PROVISION_DEFAULT_ROLE: 'SENDER' }
+    );
+    const cookie = oauthCookie('state-1', 'nonce-1', 'verifier-1');
+    const res = await callback(app, cookie, { code: 'c', state: 'state-1' });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`${APP_PUBLIC_URL}/login`);
+
+    const created = await prisma.user.findUnique({ where: { email }, include: { roles: true } });
+    expect(created).not.toBeNull();
+    expect(created?.roles.map((r) => r.role)).toEqual(['SENDER']);
+  });
+
   it('a deactivated user is refused even with a fully valid Google ID token, and no identity link is created', async () => {
     const { services } = buildFullApp(prisma, {});
     const user = await createTestUser(prisma, services, { status: 'DEACTIVATED' });
