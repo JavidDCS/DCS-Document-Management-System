@@ -129,7 +129,7 @@ export function registerRoutes(secure: SecureRouter, ctx: AppContext, svc: Servi
   registerEmailRoutes(secure, ctx, {
     email: svc.email,
     connections: svc.emailConnections,
-    publicUrl: cfg.APP_PUBLIC_URL ?? cfg.CORS_ORIGINS[0] ?? 'http://127.0.0.1:5173',
+    publicUrl: cfg.APP_PUBLIC_URL ?? cfg.CORS_ORIGINS[0]!,
   });
   registerAuditRoutes(secure, ctx, svc.db);
   registerReportsRoutes(secure, ctx, svc.db);

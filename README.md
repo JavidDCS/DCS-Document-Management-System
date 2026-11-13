@@ -101,10 +101,10 @@ The bootstrap CLI:
 Run API and Web applications concurrently or in separate terminals:
 
 ```bash
-# Start backend API (defaults to http://127.0.0.1:4800)
+# Start backend API (defaults to http://127.0.0.1:7800)
 npm run dev:api
 
-# Start frontend SPA (defaults to http://127.0.0.1:5173 with proxy to /api)
+# Start frontend SPA (defaults to http://127.0.0.1:7801 with proxy to /api)
 npm run dev:web
 ```
 
@@ -225,5 +225,5 @@ Key settings:
 - Strict CSP (`default-src 'self'`, `frame-ancestors 'none'`, `object-src 'none'`).
 - `client_max_body_size 30m` for uploads.
 - HSTS (`max-age=31536000; includeSubDomains`).
-- API proxying to `127.0.0.1:4800` with buffering and forwarded headers.
+- API proxying to `127.0.0.1:7800` with buffering and forwarded headers.
 

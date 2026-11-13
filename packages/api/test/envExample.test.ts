@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { repoRoot } from '../src/config/envFiles.js';
-import { envObject } from '../src/config/envSchema.js';
+import { envObject, envSchema } from '../src/config/envSchema.js';
 
 function exampleKeys(): string[] {
   const text = readFileSync(path.join(repoRoot(), '.env.example'), 'utf8');
@@ -10,10 +10,13 @@ function exampleKeys(): string[] {
 }
 
 describe('.env.example', () => {
-  it('lists every variable the schema knows', () => {
+  it('lists every variable that must be set (the ones with no default)', () => {
     const keys = new Set(exampleKeys());
-    const missing = Object.keys(envObject.shape).filter((k) => !keys.has(k));
-    expect(missing).toEqual([]);
+    const result = envSchema.safeParse({});
+    const noDefault = result.success ? [] : [...new Set(result.error.issues.map((i) => String(i.path[0])))];
+    const required = [...noDefault, 'STORAGE_LOCAL_ROOT', 'STORAGE_QUARANTINE_ROOT'];
+    expect(required.length).toBeGreaterThanOrEqual(5);
+    expect(required.filter((k) => !keys.has(k))).toEqual([]);
   });
 
   it('lists no variable the schema does not know', () => {

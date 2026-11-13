@@ -33,7 +33,8 @@ describe('envSchema', () => {
     const r = envSchema.safeParse(valid);
     expect(r.success).toBe(true);
     if (r.success) {
-      expect(r.data.API_PORT).toBe(4800);
+      expect(r.data.API_PORT).toBe(7800);
+      expect(r.data.WEB_PORT).toBe(7801);
       expect(r.data.NODE_ENV).toBe('development');
       expect(r.data.RATE_LIMIT_LOGIN_MAX).toBe(20);
     }

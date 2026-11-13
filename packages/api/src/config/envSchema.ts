@@ -37,7 +37,9 @@ export const envObject = z.object({
   // Server
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   API_HOST: z.string().min(1).default('127.0.0.1'),
-  API_PORT: intInRange(1, 65535, 4800),
+  API_PORT: intInRange(1, 65535, 7800),
+  WEB_HOST: z.string().min(1).default('127.0.0.1'),
+  WEB_PORT: intInRange(1, 65535, 7801),
   APP_PUBLIC_URL: z.preprocess(blankToUndefined, z.url().optional()),
   TRUST_PROXY: intInRange(0, 10, 0),
   APP_TIMEZONE: z
@@ -74,7 +76,8 @@ export const envObject = z.object({
   ),
 
   // CORS: explicit origins only
-  CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN is required').default('http://127.0.0.1:5173'),
+  // Comma-separated browser origins. When unset it is derived from WEB_HOST and WEB_PORT (http, so production must set it explicitly).
+  CORS_ORIGIN: z.preprocess(blankToUndefined, z.string().min(1).optional()),
   CSP_REPORT_URI: z.preprocess(blankToUndefined, z.url().optional()),
 
   // CSRF and cookies
@@ -248,7 +251,7 @@ export const envSchema = envObject.superRefine((e, ctx) => {
     fail('EMAIL_TOKEN_ENCRYPTION_KEY', 'EMAIL_TOKEN_ENCRYPTION_KEY must differ from FILE_ENCRYPTION_MASTER_KEY');
   }
 
-  const origins = parseOrigins(e.CORS_ORIGIN);
+  const origins = parseOrigins(e.CORS_ORIGIN ?? `http://${e.WEB_HOST}:${e.WEB_PORT}`);
   if (origins.length === 0) fail('CORS_ORIGIN', 'CORS_ORIGIN must list at least one origin');
   for (const o of origins) {
     if (o === '*') {

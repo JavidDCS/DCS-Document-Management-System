@@ -32,7 +32,7 @@ if (!parsed.success) {
 export const env = {
   ...parsed.data,
   COOKIE_SECURE: parsed.data.COOKIE_SECURE ?? parsed.data.NODE_ENV === 'production',
-  CORS_ORIGINS: parseOrigins(parsed.data.CORS_ORIGIN),
+  CORS_ORIGINS: parseOrigins(parsed.data.CORS_ORIGIN ?? `http://${parsed.data.WEB_HOST}:${parsed.data.WEB_PORT}`),
 };
 
 export type Env = typeof env;
