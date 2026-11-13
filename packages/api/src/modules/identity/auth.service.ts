@@ -216,9 +216,14 @@ export class AuthService {
    * subject id. Goes through the identical session/permission machinery as password login; no parallel logic.
    */
   async loginWithProvider(identity: VerifiedIdentity, meta: ClientMeta & { requestId?: string }): Promise<AuthResult> {
+    const extraDomains = (this.cfg as any).ALLOWED_GOOGLE_DOMAINS
+      ? String((this.cfg as any).ALLOWED_GOOGLE_DOMAINS).split(',').map((d: string) => d.trim().toLowerCase()).filter(Boolean)
+      : [];
+    const allowed = [this.cfg.ALLOWED_EMAIL_DOMAIN.toLowerCase(), ...extraDomains];
+    const emailDomain = identity.email.split('@')[1]?.toLowerCase();
     const domainMatches =
-      identity.hostedDomain === this.cfg.ALLOWED_EMAIL_DOMAIN ||
-      (!identity.hostedDomain && identity.email.endsWith(`@${this.cfg.ALLOWED_EMAIL_DOMAIN}`));
+      (identity.hostedDomain && allowed.includes(identity.hostedDomain.toLowerCase())) ||
+      (emailDomain && allowed.includes(emailDomain));
     if (!domainMatches) {
       await this.loginEvent(this.db, 'DENIED_WRONG_DOMAIN', identity.email, null, meta, identity.provider.toLowerCase());
       await this.audit(this.db, 'LOGIN_FAILED', null, meta, 'DENIED', { reason: 'wrong_domain', provider: identity.provider });
