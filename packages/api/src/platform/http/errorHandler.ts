@@ -1,6 +1,6 @@
 import type { ErrorRequestHandler, NextFunction, Request, RequestHandler, Response } from 'express';
 import { ZodError } from 'zod';
-import type { ApiErrorBody } from '@dcs-docs/shared';
+import { type ApiErrorBody, formatFriendlyError } from '@dcs-docs/shared';
 import { HttpError, type FieldIssue } from '../../utils/httpError.js';
 import { logger } from '../../utils/logger.js';
 
@@ -59,6 +59,9 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
 
   if (!known) {
     logger.error('Unhandled error', { requestId: req.id, method: req.method, path: req.path, err });
+    if (process.env.NODE_ENV !== 'production') {
+      console.error(formatFriendlyError(err, { route: `${req.method} ${req.path}`, action: 'API Request' }));
+    }
     if (err instanceof Error && err.stack) logger.debug('Stack', err.stack);
   }
 

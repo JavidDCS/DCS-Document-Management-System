@@ -1,3 +1,4 @@
+import { formatBox } from '@dcs-docs/shared';
 import { logger } from '../utils/logger.js';
 import { loadEnvFiles } from './envFiles.js';
 import { defaultOrigin, envSchema, parseOrigins } from './envSchema.js';
@@ -26,6 +27,18 @@ if (!parsed.success) {
   for (const issue of parsed.error.issues) {
     console.error(`   - ${issue.path.join('.')}: ${issue.message}`);
   }
+  console.error(
+    formatBox({
+      title: 'Environment Configuration Error (.env)',
+      fields: [
+        { label: 'What happened', value: `Found ${parsed.error.issues.length} invalid or missing environment variable(s).` },
+        { label: 'Details', value: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('\n') },
+        { label: 'File', value: '.env' },
+        { label: 'How to fix it', value: 'Check your .env file against .env.example, or run "npm run check" for automated diagnosis.' },
+      ],
+      severity: 'error',
+    })
+  );
   process.exit(1);
 }
 

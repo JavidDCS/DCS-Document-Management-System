@@ -19,6 +19,8 @@
     "prisma:status": "npm run prisma:status -w packages/api",
     "prisma:deploy": "npm run prisma:deploy -w packages/api",
     "audit:verify": "npm run audit:verify -w packages/api",
+    "check": "tsx scripts/doctor.ts",
+    "doctor": "tsx scripts/doctor.ts",
     "dev:web": "npm run dev -w packages/web",
     "dev": "concurrently -n api,web -c blue,green --kill-others-on-fail \"npm:dev:api\" \"npm:dev:web\""
   },

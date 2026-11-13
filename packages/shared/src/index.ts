@@ -6,3 +6,4 @@ export * from './auth.js';
 export * from './metadata.js';
 export * from './documents.js';
 export * from './email.js';
+export * from './friendlyError.js';
