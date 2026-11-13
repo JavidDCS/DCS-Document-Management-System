@@ -53,9 +53,12 @@ export type ServicesConfig = AppConfig &
     GMAIL_OAUTH_CLIENT_SECRET?: string | undefined;
     GMAIL_OAUTH_REDIRECT_URI?: string | undefined;
     AUTH_GOOGLE_LOGIN_ENABLED: boolean;
+    AUTH_GOOGLE_AUTO_PROVISION?: boolean | undefined;
+    AUTH_GOOGLE_DEFAULT_ROLE?: 'VIEWER' | 'SENDER' | 'ADMIN' | undefined;
     GOOGLE_CLIENT_ID?: string | undefined;
     GOOGLE_CLIENT_SECRET?: string | undefined;
     GOOGLE_REDIRECT_URI?: string | undefined;
+    ALLOWED_GOOGLE_DOMAINS?: string | undefined;
   };
 
 export interface ServiceDeps {

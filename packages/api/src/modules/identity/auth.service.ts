@@ -22,6 +22,9 @@ export interface AuthConfig {
   REAUTH_MAX_AGE_SECONDS: number;
   ALLOWED_EMAIL_DOMAIN: string;
   AUTH_PASSWORD_LOGIN_ENABLED: boolean;
+  AUTH_GOOGLE_AUTO_PROVISION?: boolean | undefined;
+  AUTH_GOOGLE_DEFAULT_ROLE?: 'VIEWER' | 'SENDER' | 'ADMIN' | undefined;
+  ALLOWED_GOOGLE_DOMAINS?: string | undefined;
 }
 
 const GENERIC_LOGIN_ERROR = 'Invalid email or password';
@@ -238,11 +241,37 @@ export class AuthService {
     if (linked) {
       userId = linked.userId;
     } else {
-      const existing = await this.db.user.findUnique({ where: { email: identity.email }, select: { id: true, status: true } });
+      let existing = await this.db.user.findUnique({ where: { email: identity.email }, select: { id: true, status: true } });
       if (!existing) {
-        await this.loginEvent(this.db, 'DENIED_NOT_INVITED', identity.email, null, meta, identity.provider.toLowerCase());
-        await this.audit(this.db, 'LOGIN_FAILED', null, meta, 'DENIED', { reason: 'not_invited', provider: identity.provider });
-        throw new HttpError(401, 'No account is set up for this Google address. Ask an admin to invite you.', 'GOOGLE_NOT_INVITED');
+        if (this.cfg.AUTH_GOOGLE_AUTO_PROVISION) {
+          const defaultRole = this.cfg.AUTH_GOOGLE_DEFAULT_ROLE || 'VIEWER';
+          const displayName = identity.name?.trim() || identity.email.split('@')[0];
+          existing = await this.db.$transaction(async (tx) => {
+            const created = await tx.user.create({
+              data: {
+                email: identity.email,
+                name: displayName,
+                status: 'ACTIVE',
+                roles: {
+                  create: {
+                    role: defaultRole,
+                  },
+                },
+              },
+              select: { id: true, status: true },
+            });
+            await this.audit(tx, 'USER_AUTO_PROVISIONED', created.id, meta, 'SUCCESS', {
+              provider: identity.provider,
+              role: defaultRole,
+              email: identity.email,
+            });
+            return created;
+          });
+        } else {
+          await this.loginEvent(this.db, 'DENIED_NOT_INVITED', identity.email, null, meta, identity.provider.toLowerCase());
+          await this.audit(this.db, 'LOGIN_FAILED', null, meta, 'DENIED', { reason: 'not_invited', provider: identity.provider });
+          throw new HttpError(401, 'No account is set up for this Google address. Ask an admin to invite you.', 'GOOGLE_NOT_INVITED');
+        }
       }
       // Checked before linking: a deactivated account's first Google attempt must not create a lasting link either.
       if (existing.status === 'DEACTIVATED') {

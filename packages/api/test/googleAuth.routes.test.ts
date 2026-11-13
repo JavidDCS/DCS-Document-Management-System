@@ -20,10 +20,13 @@ describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
     });
   }
 
-  function buildApp(verifyIdToken: NonNullable<GoogleOidcConfig['verifyIdToken']>): TestApp {
+  function buildApp(
+    verifyIdToken: NonNullable<GoogleOidcConfig['verifyIdToken']>,
+    extraConfig?: Partial<Parameters<typeof buildFullApp>[1]>
+  ): TestApp {
     return buildFullApp(
       prisma,
-      { AUTH_GOOGLE_LOGIN_ENABLED: true, GOOGLE_CLIENT_ID: 'test-client-id', GOOGLE_CLIENT_SECRET: 'test-client-secret' },
+      { AUTH_GOOGLE_LOGIN_ENABLED: true, GOOGLE_CLIENT_ID: 'test-client-id', GOOGLE_CLIENT_SECRET: 'test-client-secret', ...extraConfig },
       { googleProvider: fakeProvider(verifyIdToken) }
     ).app;
   }
@@ -40,7 +43,10 @@ describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
   }
 
   beforeEach(async () => {
-    if (!skipDb) await prisma.loginEvent.deleteMany({});
+    if (!skipDb) {
+      await prisma.loginEvent.deleteMany({});
+      await prisma.identityAccount.deleteMany({});
+    }
   });
 
   it('start redirects to Google with PKCE, nonce and state, and sets the signed state cookie', async () => {
@@ -111,6 +117,25 @@ describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
     expect(await prisma.user.findUnique({ where: { email } })).toBeNull();
     const event = await prisma.loginEvent.findFirst({ where: { emailAttempted: email } });
     expect(event?.outcome).toBe('DENIED_NOT_INVITED');
+  });
+
+  it('auto-provisions a new user with default role when AUTH_GOOGLE_AUTO_PROVISION is enabled', async () => {
+    const email = uniqueEmail('auto-prov');
+    const app = buildApp(
+      async () => ({ sub: 'sub-auto-1', email, email_verified: true, hd: 'decirclesolar.com', name: 'Auto User', nonce: 'nonce-1' }),
+      { AUTH_GOOGLE_AUTO_PROVISION: true, AUTH_GOOGLE_DEFAULT_ROLE: 'VIEWER' }
+    );
+    const cookie = oauthCookie('state-1', 'nonce-1', 'verifier-1');
+    const res = await callback(app, cookie, { code: 'c', state: 'state-1' });
+
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`${APP_PUBLIC_URL}/login`);
+
+    const created = await prisma.user.findUnique({ where: { email }, include: { roles: true } });
+    expect(created).not.toBeNull();
+    expect(created?.name).toBe('Auto User');
+    expect(created?.status).toBe('ACTIVE');
+    expect(created?.roles.map((r) => r.role)).toEqual(['VIEWER']);
   });
 
   it('a deactivated user is refused even with a fully valid Google ID token, and no identity link is created', async () => {

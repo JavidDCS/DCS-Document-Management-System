@@ -117,6 +117,8 @@ export const envObject = z.object({
   // Google Workspace sign-in (OIDC Authorization Code + PKCE), an additional login method. Optional until configured.
   AUTH_PASSWORD_LOGIN_ENABLED: flag(true),
   AUTH_GOOGLE_LOGIN_ENABLED: flag(false),
+  AUTH_GOOGLE_AUTO_PROVISION: flag(false),
+  AUTH_GOOGLE_DEFAULT_ROLE: z.enum(['VIEWER', 'SENDER', 'ADMIN']).default('VIEWER'),
   GOOGLE_LOGIN_ENABLED: z.preprocess(blankToUndefined, z.enum(['true', 'false']).optional()).transform((v) => v === 'true'),
   ALLOWED_GOOGLE_DOMAINS: optionalString,
   GOOGLE_CLIENT_ID: optionalString,
