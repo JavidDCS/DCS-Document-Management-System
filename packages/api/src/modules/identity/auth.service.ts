@@ -248,7 +248,7 @@ export class AuthService {
         const isAutoProvision = Boolean(this.cfg.GOOGLE_AUTO_PROVISION || this.cfg.AUTH_GOOGLE_AUTO_PROVISION);
         if (isAutoProvision) {
           const defaultRole = this.cfg.GOOGLE_AUTO_PROVISION_DEFAULT_ROLE ?? this.cfg.AUTH_GOOGLE_DEFAULT_ROLE ?? 'VIEWER';
-          const displayName = identity.name?.trim() || identity.email.split('@')[0];
+          const displayName = identity.name?.trim() || identity.email.split('@')[0] || identity.email;
           existing = await this.db.$transaction(async (tx) => {
             const created = await tx.user.create({
               data: {

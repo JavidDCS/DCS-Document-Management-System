@@ -4,7 +4,7 @@ import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { ApiError } from '../api';
 import { useAuth } from '../auth/AuthContext';
 import { AuthShell } from '../components/AuthShell';
-import { ErrorBanner, InfoBanner } from '../components/ui';
+import { ErrorBanner, InfoBanner, Spinner } from '../components/ui';
 import { useTitle } from '../hooks';
 
 function GoogleIcon(props: { className?: string }) {
@@ -53,6 +53,14 @@ export function LoginPage() {
   const from = (loc.state as { from?: string } | null)?.from;
   const googleErrorCode = new URLSearchParams(loc.search).get('error');
   const googleError = googleErrorCode ? (GOOGLE_ERROR_MESSAGES[googleErrorCode] ?? GOOGLE_ERROR_MESSAGES.invalid) : null;
+
+  if (status === 'loading') {
+    return (
+      <div className="grid min-h-screen place-items-center">
+        <Spinner label="Signing you in…" />
+      </div>
+    );
+  }
 
   if (status === 'authed') return <Navigate to={from && from !== '/login' ? from : '/'} replace />;
 

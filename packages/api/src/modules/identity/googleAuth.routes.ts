@@ -39,6 +39,19 @@ export function registerGoogleAuthRoutes(secure: SecureRouter, ctx: AppContext, 
   const clearOauthCookie = (res: Response) => res.clearCookie(oauthCookie, { httpOnly: true, secure: cookie.secure, sameSite: 'lax', path: OAUTH_COOKIE_PATH });
   const redirectWithError = (res: Response, code: string) => res.redirect(302, `${appPublicUrl}/login?error=${code}`);
 
+  /**
+   * A plain HTTP 302 here would still be part of the cross-site navigation chain that started at Google's consent
+   * page, so some browsers refuse to attach the SameSite=Strict refresh cookie we just set on the very next hop.
+   * Serving a same-origin HTML bounce page makes the next navigation a fresh, same-site one, so the cookie is
+   * reliably sent when the SPA loads and calls /auth/refresh.
+   */
+  const bounceTo = (res: Response, target: string) => {
+    res.status(200).type('html').send(
+      `<!doctype html><html><head><meta charset="utf-8"><script>location.replace(${JSON.stringify(target)});</script></head>` +
+        `<body>Redirecting… <a href="${target.replace(/"/g, '&quot;')}">Continue</a></body></html>`
+    );
+  };
+
   secure.get(
     '/auth/google/start',
     PUBLIC('redirects to Google; the OAuth state is bound to this browser by a signed, single-use cookie'),
@@ -94,7 +107,7 @@ export function registerGoogleAuthRoutes(secure: SecureRouter, ctx: AppContext, 
           path: '/api/v1/auth',
           expires: result.refreshExpiresAt,
         });
-        return res.redirect(302, `${appPublicUrl}/login`);
+        return bounceTo(res, `${appPublicUrl}/`);
       } catch (err) {
         if (err instanceof HttpError) {
           const byCode: Record<string, string> = {
