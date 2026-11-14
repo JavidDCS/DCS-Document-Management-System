@@ -39,22 +39,6 @@ export function registerGoogleAuthRoutes(secure: SecureRouter, ctx: AppContext, 
   const clearOauthCookie = (res: Response) => res.clearCookie(oauthCookie, { httpOnly: true, secure: cookie.secure, sameSite: 'lax', path: OAUTH_COOKIE_PATH });
   const redirectWithError = (res: Response, code: string) => res.redirect(302, `${appPublicUrl}/login?error=${code}`);
 
-  /**
-   * A plain HTTP 302 here would still be part of the cross-site navigation chain that started at Google's consent
-   * page, so some browsers refuse to attach the SameSite=Strict refresh cookie we just set on the very next hop.
-   * Serving a same-origin HTML bounce page makes the next navigation a fresh, same-site one, so the cookie is
-   * reliably sent when the SPA loads and calls /auth/refresh. This API sends a strict `default-src 'none'` CSP on
-   * every response (see securityHeaders.ts), which blocks inline <script>, so the bounce is a <meta refresh> —
-   * plain declarative HTML navigation, not script execution, and CSP has no effect on it.
-   */
-  const bounceTo = (res: Response, target: string) => {
-    const safe = target.replace(/"/g, '&quot;');
-    res.status(200).type('html').send(
-      `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${safe}"></head>` +
-        `<body>Redirecting… <a href="${safe}">Continue</a></body></html>`
-    );
-  };
-
   secure.get(
     '/auth/google/start',
     PUBLIC('redirects to Google; the OAuth state is bound to this browser by a signed, single-use cookie'),
@@ -106,11 +90,17 @@ export function registerGoogleAuthRoutes(secure: SecureRouter, ctx: AppContext, 
         res.cookie(cookie.name, result.refreshToken, {
           httpOnly: true,
           secure: cookie.secure,
-          sameSite: 'strict',
+          // Lax, not Strict, for this one issuance only: this request is the top-level GET navigation Google just
+          // redirected the browser to, and Chrome/Firefox/Safari all have documented inconsistencies attaching a
+          // Strict cookie to the request that immediately follows a cross-site-initiated redirect chain (Chromium
+          // issue 1221316; matching Firefox/WebKit reports). Lax is designed for exactly this case. The very next
+          // /auth/login, /auth/refresh etc. call is a plain same-origin fetch, which re-issues this cookie as
+          // Strict (see identity.routes.ts), so the Lax window is this single response only.
+          sameSite: 'lax',
           path: '/api/v1/auth',
           expires: result.refreshExpiresAt,
         });
-        return bounceTo(res, `${appPublicUrl}/`);
+        return res.redirect(302, `${appPublicUrl}/`);
       } catch (err) {
         if (err instanceof HttpError) {
           const byCode: Record<string, string> = {

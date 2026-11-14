@@ -42,12 +42,6 @@ describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
     return req.redirects(0);
   }
 
-  /** A successful login returns a 200 HTML bounce page (not a 302), so a same-site cookie set on this response is
-   * reliably sent on the very next request — see googleAuth.routes.ts for why a raw redirect cannot guarantee that. */
-  function expectBounceTo(res: request.Response, target: string) {
-    expect(res.status).toBe(200);
-    expect(res.text).toContain(`content="0;url=${target}"`);
-  }
 
   beforeEach(async () => {
     if (!skipDb) {
@@ -135,7 +129,8 @@ describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
     const cookie = oauthCookie('state-1', 'nonce-1', 'verifier-1');
     const res = await callback(app, cookie, { code: 'c', state: 'state-1' });
 
-    expectBounceTo(res, `${APP_PUBLIC_URL}/`);
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`${APP_PUBLIC_URL}/`);
 
     const created = await prisma.user.findUnique({ where: { email }, include: { roles: true } });
     expect(created).not.toBeNull();
@@ -153,7 +148,8 @@ describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
     const cookie = oauthCookie('state-1', 'nonce-1', 'verifier-1');
     const res = await callback(app, cookie, { code: 'c', state: 'state-1' });
 
-    expectBounceTo(res, `${APP_PUBLIC_URL}/`);
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`${APP_PUBLIC_URL}/`);
 
     const created = await prisma.user.findUnique({ where: { email }, include: { roles: true } });
     expect(created).not.toBeNull();
@@ -178,7 +174,8 @@ describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
     const app = buildApp(async () => ({ sub: 'stable-sub-1', email: user.email, email_verified: true, hd: 'decirclesolar.com', name: 'Test User', nonce: 'nonce-1' }));
 
     const res1 = await callback(app, oauthCookie('state-1', 'nonce-1', 'verifier-1'), { code: 'c1', state: 'state-1' });
-    expectBounceTo(res1, `${APP_PUBLIC_URL}/`);
+    expect(res1.status).toBe(302);
+    expect(res1.headers.location).toBe(`${APP_PUBLIC_URL}/`);
     const refreshSet = (res1.headers['set-cookie'] as unknown as string[]).find((c) => c.startsWith('dcs_docs_refresh='));
     expect(refreshSet).toBeDefined();
 
@@ -190,7 +187,8 @@ describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
 
     // Second login: same subject, even if the identity's email were to differ later, still resolves to the same user.
     const res2 = await callback(app, oauthCookie('state-2', 'nonce-1', 'verifier-2'), { code: 'c2', state: 'state-2' });
-    expectBounceTo(res2, `${APP_PUBLIC_URL}/`);
+    expect(res2.status).toBe(302);
+    expect(res2.headers.location).toBe(`${APP_PUBLIC_URL}/`);
     expect(await prisma.identityAccount.count({ where: { userId: user.id, provider: 'GOOGLE' } })).toBe(1);
   });
 
