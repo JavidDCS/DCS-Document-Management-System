@@ -133,6 +133,10 @@ export const envObject = z.object({
   SEED_SUPER_ADMIN_NAME: z.preprocess(blankToUndefined, z.string().trim().min(1).max(100).optional()),
   SEED_SUPER_ADMIN_PASSWORD: optionalString,
 
+  // Extra invited users, used only by `npm run seed:team`. Format: "email:name:role,email:name:role,..."
+  SEED_TEAM_USERS: optionalString,
+  SEED_TEAM_PASSWORD: optionalString,
+
   // Storage: local disk now; OCI Object Storage / S3 / MinIO later by changing these variables only
   STORAGE_DRIVER: z.enum(['local', 'oci', 's3']).default('local'),
   STORAGE_LOCAL_ROOT: optionalString,
