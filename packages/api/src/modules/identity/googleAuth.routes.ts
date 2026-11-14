@@ -43,12 +43,15 @@ export function registerGoogleAuthRoutes(secure: SecureRouter, ctx: AppContext, 
    * A plain HTTP 302 here would still be part of the cross-site navigation chain that started at Google's consent
    * page, so some browsers refuse to attach the SameSite=Strict refresh cookie we just set on the very next hop.
    * Serving a same-origin HTML bounce page makes the next navigation a fresh, same-site one, so the cookie is
-   * reliably sent when the SPA loads and calls /auth/refresh.
+   * reliably sent when the SPA loads and calls /auth/refresh. This API sends a strict `default-src 'none'` CSP on
+   * every response (see securityHeaders.ts), which blocks inline <script>, so the bounce is a <meta refresh> —
+   * plain declarative HTML navigation, not script execution, and CSP has no effect on it.
    */
   const bounceTo = (res: Response, target: string) => {
+    const safe = target.replace(/"/g, '&quot;');
     res.status(200).type('html').send(
-      `<!doctype html><html><head><meta charset="utf-8"><script>location.replace(${JSON.stringify(target)});</script></head>` +
-        `<body>Redirecting… <a href="${target.replace(/"/g, '&quot;')}">Continue</a></body></html>`
+      `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${safe}"></head>` +
+        `<body>Redirecting… <a href="${safe}">Continue</a></body></html>`
     );
   };
 

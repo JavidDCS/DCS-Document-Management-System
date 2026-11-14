@@ -46,7 +46,7 @@ describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
    * reliably sent on the very next request — see googleAuth.routes.ts for why a raw redirect cannot guarantee that. */
   function expectBounceTo(res: request.Response, target: string) {
     expect(res.status).toBe(200);
-    expect(res.text).toContain(JSON.stringify(target));
+    expect(res.text).toContain(`content="0;url=${target}"`);
   }
 
   beforeEach(async () => {
