@@ -11,6 +11,11 @@ export default defineConfig(({ mode }) => {
   const apiTarget = process.env.VITE_API_TARGET ?? `http://${env.API_HOST || '127.0.0.1'}:${env.API_PORT || '7800'}`;
   const host = env.WEB_HOST || '127.0.0.1';
   const port = Number(env.WEB_PORT || '7801');
+  // Vite's dev/preview server rejects any Host header it doesn't recognize (CVE-2025-30208-style DNS rebinding
+  // protection). Behind Nginx on a real domain, the public hostname must be added explicitly or every request
+  // is blocked with "Blocked request. This host is not allowed."
+  const publicHost = env.APP_PUBLIC_URL ? new URL(env.APP_PUBLIC_URL).hostname : undefined;
+  const allowedHosts = publicHost ? [publicHost] : undefined;
   return {
     plugins: [
       react(),
@@ -34,8 +39,8 @@ export default defineConfig(({ mode }) => {
         },
       },
     ],
-    server: { host, port, strictPort: true, proxy: { '/api': { target: apiTarget, changeOrigin: false } } },
-    preview: { host, port, strictPort: true, proxy: { '/api': { target: apiTarget, changeOrigin: false } } },
+    server: { host, port, strictPort: true, proxy: { '/api': { target: apiTarget, changeOrigin: false } }, allowedHosts },
+    preview: { host, port, strictPort: true, proxy: { '/api': { target: apiTarget, changeOrigin: false } }, allowedHosts },
     envDir: fileURLToPath(new URL('../..', import.meta.url)),
     envPrefix: ['VITE_', 'AUTH_', 'GOOGLE_', 'APP_', 'ALLOWED_'],
     define: {
