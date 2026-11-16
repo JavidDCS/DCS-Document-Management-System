@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { packOauthState } from '../src/modules/identity/googleLoginState.js';
 import { GoogleOidcProvider, type GoogleOidcConfig } from '../src/providers/identity/googleOidc.js';
 import { skipDb, testPrisma } from './helpers/db.js';
-import { buildFullApp, createTestUser, testConfig, uniqueEmail, type TestApp } from './helpers/fullApp.js';
+import { buildFullApp, createTestUser, csrfPair, testConfig, uniqueEmail, type TestApp } from './helpers/fullApp.js';
 
 describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
   const prisma = testPrisma();
@@ -154,6 +154,40 @@ describe.skipIf(skipDb)('Google sign-in (/auth/google/*)', () => {
     const created = await prisma.user.findUnique({ where: { email }, include: { roles: true } });
     expect(created).not.toBeNull();
     expect(created?.roles.map((r) => r.role)).toEqual(['SENDER']);
+  });
+
+  it('a Google-only account (no password credential ever created) can restore its session and load /auth/me, exactly what the SPA does to reach the dashboard', async () => {
+    const email = uniqueEmail('dashboard-check');
+    const app = buildApp(
+      async () => ({ sub: 'sub-dashboard-check', email, email_verified: true, hd: 'decirclesolar.com', name: 'Dashboard Check', nonce: 'nonce-1' }),
+      { AUTH_GOOGLE_AUTO_PROVISION: true, AUTH_GOOGLE_DEFAULT_ROLE: 'VIEWER' }
+    );
+    const loginRes = await callback(app, oauthCookie('state-1', 'nonce-1', 'verifier-1'), { code: 'c', state: 'state-1' });
+    expect(loginRes.status).toBe(302);
+    const refreshCookie = (loginRes.headers['set-cookie'] as unknown as string[]).find((c) => c.startsWith('dcs_docs_refresh='))!.split(';')[0]!;
+
+    const created = await prisma.user.findUnique({ where: { email } });
+    expect(created?.id).toBeDefined();
+    const credential = await prisma.passwordCredential.findUnique({ where: { userId: created!.id } });
+    expect(credential).toBeNull(); // confirms this account genuinely has no password row
+
+    // This is exactly what AuthProvider.restoreSession() does on page load: POST /auth/refresh using the cookie
+    // alone. Before the fix, this failed with 401 UNAUTHENTICATED for any account with no credential row,
+    // which is why Google sign-in landed back on the login page instead of the dashboard.
+    const csrf = await csrfPair(app);
+    const refreshRes = await request(app)
+      .post('/api/v1/auth/refresh')
+      .set('Cookie', [csrf.cookie, refreshCookie].join('; '))
+      .set('X-CSRF-Token', csrf.token)
+      .set('Origin', APP_PUBLIC_URL)
+      .send();
+    expect(refreshRes.status).toBe(200);
+    expect(refreshRes.body.data.accessToken).toBeTruthy();
+
+    const meRes = await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${refreshRes.body.data.accessToken}`);
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.data.user.email).toBe(email);
+    expect(meRes.body.data.user.mustChangePassword).toBe(false);
   });
 
   it('a deactivated user is refused even with a fully valid Google ID token, and no identity link is created', async () => {
