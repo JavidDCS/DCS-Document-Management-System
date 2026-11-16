@@ -170,7 +170,8 @@ export class SessionService {
     });
     if (!s || s.userId !== userId || s.revokedAt || s.absoluteExpiresAt <= new Date()) return null;
     const u = s.user;
-    if (u.status === 'DEACTIVATED' || !u.credential) return null;
+    // A Google-only account has no credential row at all; that's not an invalid session, just no password method.
+    if (u.status === 'DEACTIVATED') return null;
     const roles = u.roles.map((r) => r.role).filter((r): r is Role => (ROLES as readonly string[]).includes(r));
     return {
       userId: u.id,
@@ -180,7 +181,7 @@ export class SessionService {
       status: u.status === 'ACTIVE' ? 'ACTIVE' : 'INVITED',
       roles,
       permissions: permissionsForRoles(roles),
-      mustChangePassword: u.credential.mustChangePassword,
+      mustChangePassword: u.credential?.mustChangePassword ?? false,
       authTime: s.authTime,
     };
   }

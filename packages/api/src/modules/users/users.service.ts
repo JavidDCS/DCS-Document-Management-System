@@ -195,9 +195,12 @@ export class UsersService {
     const temporaryPassword = generateTemporaryPassword();
     const passwordHash = await this.hasher.hash(temporaryPassword);
     await this.db.$transaction(async (tx) => {
-      await tx.passwordCredential.update({
+      // upsert, not update: a Google-only account (auto-provisioned or otherwise never set a password) has no
+      // password_credentials row yet. Resetting its password is how it gains password login as a second method.
+      await tx.passwordCredential.upsert({
         where: { userId: id },
-        data: { passwordHash, mustChangePassword: true, failedLoginCount: 0, lockedUntil: null },
+        create: { userId: id, passwordHash, mustChangePassword: true },
+        update: { passwordHash, mustChangePassword: true, failedLoginCount: 0, lockedUntil: null },
       });
       await this.sessions.revokeAllForUser(tx, id, 'PASSWORD_CHANGED');
       await this.audit(tx, actor, 'PASSWORD_RESET_BY_ADMIN', id, meta);

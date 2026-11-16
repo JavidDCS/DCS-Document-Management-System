@@ -322,8 +322,9 @@ export class AuthService {
       throw new HttpError(401, INVALID_SESSION, 'UNAUTHENTICATED');
     }
     const user = await this.db.user.findUnique({ where: { id: rotated.userId }, include: { credential: true, roles: true } });
-    if (!user || !user.credential || user.status === 'DEACTIVATED') throw new HttpError(401, INVALID_SESSION, 'UNAUTHENTICATED');
-    return this.result(toAuthUser(user, user.credential.mustChangePassword), rotated.issued, new Date());
+    // Google-only accounts have no credential row; that alone must not deny a legitimately rotated session.
+    if (!user || user.status === 'DEACTIVATED') throw new HttpError(401, INVALID_SESSION, 'UNAUTHENTICATED');
+    return this.result(toAuthUser(user, user.credential?.mustChangePassword ?? false), rotated.issued, new Date());
   }
 
   async logout(refreshToken: string | undefined, meta: ClientMeta & { requestId?: string }): Promise<void> {
@@ -334,8 +335,8 @@ export class AuthService {
 
   async me(userId: string): Promise<AuthUser> {
     const user = await this.db.user.findUnique({ where: { id: userId }, include: { credential: true, roles: true } });
-    if (!user || !user.credential) throw new HttpError(401, 'Authentication required', 'UNAUTHENTICATED');
-    return toAuthUser(user, user.credential.mustChangePassword);
+    if (!user) throw new HttpError(401, 'Authentication required', 'UNAUTHENTICATED');
+    return toAuthUser(user, user.credential?.mustChangePassword ?? false);
   }
 
   /** Verifies the typed password for an already signed-in user; failures count toward the lockout. */
