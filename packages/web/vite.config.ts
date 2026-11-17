@@ -42,7 +42,11 @@ export default defineConfig(({ mode }) => {
     server: { host, port, strictPort: true, proxy: { '/api': { target: apiTarget, changeOrigin: false } }, allowedHosts },
     preview: { host, port, strictPort: true, proxy: { '/api': { target: apiTarget, changeOrigin: false } }, allowedHosts },
     envDir: fileURLToPath(new URL('../..', import.meta.url)),
-    envPrefix: ['VITE_', 'AUTH_', 'GOOGLE_', 'APP_', 'ALLOWED_'],
+    // Only VITE_-prefixed vars are auto-injected into import.meta.env. The non-VITE_ fallback
+    // names a few source files read (APP_COMPANY_NAME, ALLOWED_EMAIL_DOMAIN, AUTH_*_ENABLED,
+    // GOOGLE_LOGIN_ENABLED) are covered explicitly below via `define`, not by this prefix list —
+    // broadening it further would silently bundle any other non-VITE_ env var, secrets included.
+    envPrefix: ['VITE_'],
     define: {
       'import.meta.env.VITE_ALLOWED_EMAIL_DOMAIN': JSON.stringify(env.ALLOWED_EMAIL_DOMAIN || 'decirclesolar.com'),
       'import.meta.env.ALLOWED_EMAIL_DOMAIN': JSON.stringify(env.ALLOWED_EMAIL_DOMAIN || 'decirclesolar.com'),
