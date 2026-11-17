@@ -64,6 +64,19 @@ describe('redactValue', () => {
     expect(out.body.email).toBe('a@b.test');
   });
 
+  it('masks file-encryption key-material fields', () => {
+    const out = redactValue({
+      wrappedKey: 'abc',
+      wrappedDataKey: 'def',
+      encryptionKeyId: 'ghi',
+      keyId: 'ok-not-key-material',
+    }) as any;
+    expect(out.wrappedKey).toBe(REDACTED);
+    expect(out.wrappedDataKey).toBe(REDACTED);
+    expect(out.encryptionKeyId).toBe(REDACTED);
+    expect(out.keyId).toBe('ok-not-key-material');
+  });
+
   it('survives circular references, bigint, dates and errors', () => {
     const a: any = { n: 1n, d: new Date('2026-01-01T00:00:00Z') };
     a.self = a;

@@ -5,7 +5,7 @@ const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = { error: 0, warn: 1, info: 
 export const REDACTED = '[REDACTED]';
 
 /** Object keys whose values are never logged (case-insensitive, matched on the key name). */
-const SENSITIVE_KEY = /(authorization|cookie|set-cookie|password|passwd|secret|token|api[-_]?key|private[-_]?key|signature|credential|session|csrf|refresh|code_verifier|^code$|^key$|master)/i;
+const SENSITIVE_KEY = /(authorization|cookie|set-cookie|password|passwd|secret|token|api[-_]?key|private[-_]?key|wrapped[-_]?(?:data)?key|encryption[-_]?key(?:[-_]?id)?|signature|credential|session|csrf|refresh|code_verifier|^code$|^key$|master)/i;
 
 /** Patterns redacted from any string, whatever it sits in. */
 const SENSITIVE_PATTERNS: { pattern: RegExp; replace: string }[] = [
