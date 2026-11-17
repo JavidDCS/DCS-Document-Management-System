@@ -2,6 +2,7 @@ export * from './errors.js';
 export * from './audit.js';
 export * from './permissions.js';
 export * from './password.js';
+export * from './commonPasswords.js';
 export * from './auth.js';
 export * from './metadata.js';
 export * from './documents.js';

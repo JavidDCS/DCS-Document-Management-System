@@ -142,6 +142,14 @@ export class SessionService {
     return r.count;
   }
 
+  async revokeOthers(userId: string, currentSessionId: string): Promise<number> {
+    return this.revokeAllForUser(this.db, userId, 'LOGOUT', currentSessionId);
+  }
+
+  async revokeAll(userId: string): Promise<number> {
+    return this.revokeAllForUser(this.db, userId, 'LOGOUT');
+  }
+
   async revokeOne(userId: string, sessionId: string, reason: RevokeReason): Promise<boolean> {
     const r = await this.db.session.updateMany({ where: { id: sessionId, userId, revokedAt: null }, data: { revokedAt: new Date(), revokedReason: reason } });
     return r.count === 1;
@@ -168,7 +176,7 @@ export class SessionService {
       where: { id: sessionId },
       include: { user: { include: { roles: true, credential: { select: { mustChangePassword: true } } } } },
     });
-    if (!s || s.userId !== userId || s.revokedAt || s.absoluteExpiresAt <= new Date()) return null;
+    if (!s || s.userId !== userId || s.revokedAt || s.absoluteExpiresAt <= new Date() || s.idleExpiresAt <= new Date()) return null;
     const u = s.user;
     // A Google-only account has no credential row at all; that's not an invalid session, just no password method.
     if (u.status === 'DEACTIVATED') return null;

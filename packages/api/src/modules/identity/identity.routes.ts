@@ -41,6 +41,7 @@ export function registerIdentityRoutes(secure: SecureRouter, ctx: AppContext, de
     '/auth/login',
     PUBLIC('credentials are the proof; protected by rate limit, lockout and CSRF token'),
     limiters.auth,
+    limiters.loginEmail,
     validate({ body: loginSchema }),
     asyncHandler(async (req, res) => {
       const { email, password } = req.body as z.infer<typeof loginSchema>;
@@ -85,7 +86,7 @@ export function registerIdentityRoutes(secure: SecureRouter, ctx: AppContext, de
   secure.post(
     '/auth/change-password',
     { kind: 'authenticated', allowMustChangePassword: true },
-    limiters.auth,
+    limiters.changePassword,
     validate({ body: changePasswordSchema }),
     asyncHandler(async (req, res) => {
       const { currentPassword, newPassword } = req.body as z.infer<typeof changePasswordSchema>;
@@ -97,11 +98,21 @@ export function registerIdentityRoutes(secure: SecureRouter, ctx: AppContext, de
   secure.post(
     '/auth/reauth',
     AUTHENTICATED,
-    limiters.auth,
+    limiters.reauth,
     validate({ body: reauthSchema }),
     asyncHandler(async (req, res) => {
       const { password } = req.body as z.infer<typeof reauthSchema>;
       res.json({ data: await auth.reauth(req.auth!.userId, req.auth!.sessionId, password, meta(req)) });
+    })
+  );
+
+  secure.post(
+    '/auth/logout-all',
+    AUTHENTICATED,
+    asyncHandler(async (req, res) => {
+      const count = await sessions.revokeAll(req.auth!.userId);
+      clearRefreshCookie(res, cookie);
+      res.json({ data: { revokedCount: count } });
     })
   );
 
@@ -120,6 +131,15 @@ export function registerIdentityRoutes(secure: SecureRouter, ctx: AppContext, de
           userAgent: s.userAgent,
         })),
       });
+    })
+  );
+
+  secure.delete(
+    '/auth/sessions',
+    AUTHENTICATED,
+    asyncHandler(async (req, res) => {
+      const count = await sessions.revokeOthers(req.auth!.userId, req.auth!.sessionId);
+      res.json({ data: { revokedCount: count } });
     })
   );
 

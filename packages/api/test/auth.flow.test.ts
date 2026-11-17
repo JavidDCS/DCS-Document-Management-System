@@ -302,5 +302,80 @@ describe.skipIf(skipDb)('authentication flow (database)', () => {
       await reauth(c);
       expect((await c.post('/users', body)).status).toBe(201);
     });
+
+    it('enforces graduated lockout with growing lock duration after repeated lockouts', async () => {
+      const u = await createTestUser(prisma, services);
+      // First lockout (3 failures)
+      for (let i = 0; i < 3; i++) await loginRaw(app, u.email, 'wrong-password-1');
+      const cred1 = await prisma.passwordCredential.findUniqueOrThrow({ where: { userId: u.id } });
+      const diff1 = cred1.lockedUntil!.getTime() - Date.now();
+      expect(diff1).toBeGreaterThan(14 * 60 * 1000);
+      expect(diff1).toBeLessThanOrEqual(16 * 60 * 1000);
+
+      // Record first lockout in login_events (as happens during real login) and clear lock
+      await prisma.loginEvent.create({
+        data: {
+          userId: u.id,
+          emailAttempted: u.email,
+          method: 'password',
+          outcome: 'LOCKED',
+          createdAt: new Date(),
+        },
+      });
+      await prisma.passwordCredential.update({ where: { userId: u.id }, data: { lockedUntil: null, failedLoginCount: 0 } });
+
+      // Second lockout -> duration should double (30 min)
+      for (let i = 0; i < 3; i++) await loginRaw(app, u.email, 'wrong-password-2');
+      const cred2 = await prisma.passwordCredential.findUniqueOrThrow({ where: { userId: u.id } });
+      const diff2 = cred2.lockedUntil!.getTime() - Date.now();
+      expect(diff2).toBeGreaterThan(28 * 60 * 1000);
+      expect(diff2).toBeLessThanOrEqual(31 * 60 * 1000);
+    });
+
+    it('enforces idle session timeout on bearer-authenticated requests', async () => {
+      const u = await createTestUser(prisma, services);
+      const c = await signIn(app, u.email);
+      expect((await c.get('/auth/me')).status).toBe(200);
+
+      // Backdate idle expiration
+      await prisma.session.updateMany({ where: { userId: u.id }, data: { idleExpiresAt: new Date(Date.now() - 1000) } });
+      expect((await c.get('/auth/me')).status).toBe(401);
+    });
+
+    it('rejects an expired temporary admin-issued password', async () => {
+      const u = await createTestUser(prisma, services, { status: 'INVITED', mustChange: true });
+      // Backdate user creation & password credential past 72h
+      const past = new Date(Date.now() - 75 * 60 * 60 * 1000);
+      await prisma.user.update({ where: { id: u.id }, data: { createdAt: past } });
+      await prisma.passwordCredential.update({ where: { userId: u.id }, data: { passwordChangedAt: null } });
+
+      const res = await loginRaw(app, u.email, u.password);
+      expect(res.status).toBe(401);
+      expect(res.body.error.code).toBe('TEMPORARY_PASSWORD_EXPIRED');
+    });
+
+    it('supports DELETE /auth/sessions to revoke other sessions and POST /auth/logout-all', async () => {
+      const u = await createTestUser(prisma, services);
+      const c1 = await signIn(app, u.email);
+      const c2 = await signIn(app, u.email);
+
+      // Both can access me
+      expect((await c1.get('/auth/me')).status).toBe(200);
+      expect((await c2.get('/auth/me')).status).toBe(200);
+
+      // c1 revokes all other sessions
+      const delRes = await c1.del('/auth/sessions');
+      expect(delRes.status).toBe(200);
+      expect(delRes.body.data.revokedCount).toBe(1);
+
+      // c2 is revoked, c1 is still valid
+      expect((await c2.get('/auth/me')).status).toBe(401);
+      expect((await c1.get('/auth/me')).status).toBe(200);
+
+      // c1 calls logout-all
+      const logoutAllRes = await c1.post('/auth/logout-all', {});
+      expect(logoutAllRes.status).toBe(200);
+      expect((await c1.get('/auth/me')).status).toBe(401);
+    });
   });
 });

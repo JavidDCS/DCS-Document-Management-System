@@ -24,6 +24,21 @@ export function createLimiter(opts: LimiterOptions): RequestHandler {
   });
 }
 
+/** Rate limiter keyed by normalized email in the request body (falls back to IP). */
+export function createEmailLimiter(opts: { windowMs: number; limit: number }): RequestHandler {
+  return rateLimit({
+    windowMs: opts.windowMs,
+    limit: opts.limit,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      return email ? `email:${email}` : `ip:${ipKeyGenerator(req.ip ?? '')}`;
+    },
+    handler: (_req, _res, next) => next(new HttpError(429, 'Too many login attempts for this account. Try again later.', 'RATE_LIMITED')),
+  });
+}
+
 export interface RateLimitConfig {
   RATE_LIMIT_WINDOW_MINUTES: number;
   RATE_LIMIT_API_MAX_PER_IP: number;
@@ -45,6 +60,9 @@ export function createRateLimiters(cfg: RateLimitConfig, principal?: LimiterOpti
   return {
     api: createLimiter({ windowMs, limit: cfg.RATE_LIMIT_API_MAX_PER_IP }),
     auth: createLimiter({ windowMs, limit: cfg.RATE_LIMIT_LOGIN_MAX }),
+    loginEmail: createEmailLimiter({ windowMs, limit: cfg.RATE_LIMIT_LOGIN_MAX * 2 }),
+    changePassword: createLimiter({ windowMs, limit: 5, principal }),
+    reauth: createLimiter({ windowMs, limit: 5, principal }),
     refresh: createLimiter({ windowMs, limit: cfg.RATE_LIMIT_REFRESH_MAX }),
     upload: createLimiter({ windowMs: HOUR_MS, limit: cfg.RATE_LIMIT_UPLOAD_MAX_PER_HOUR, principal }),
     download: createLimiter({ windowMs: HOUR_MS, limit: cfg.RATE_LIMIT_DOWNLOAD_MAX_PER_HOUR, principal }),

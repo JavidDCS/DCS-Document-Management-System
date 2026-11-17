@@ -99,3 +99,14 @@ describe('request ids', () => {
     expect(res.body.error.requestId).toBe('trace-abcdef-01');
   });
 });
+
+describe('request body limits', () => {
+  it('rejects oversized JSON request bodies with 413 Payload Too Large', async () => {
+    const hugeBody = { email: 'test@decirclesolar.com', password: 'x'.repeat(120 * 1024) };
+    const res = await request(app)
+      .post('/api/v1/auth/login')
+      .set('Content-Type', 'application/json')
+      .send(hugeBody);
+    expect(res.status).toBe(413);
+  });
+});

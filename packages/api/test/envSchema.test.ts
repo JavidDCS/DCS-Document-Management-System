@@ -21,6 +21,7 @@ const prod = {
   CORS_ORIGIN: 'https://docs.example.com',
   CSRF_SECRET: 'r4nd0m-'.repeat(8),
   JWT_ACCESS_SECRET: 'jwt-r4nd0m-'.repeat(5),
+  TRUST_PROXY: 1,
 };
 
 function failures(input: Record<string, unknown>): string[] {
@@ -105,6 +106,11 @@ describe('envSchema', () => {
       expect(failures({ ...prod, JWT_ACCESS_SECRET: prod.CSRF_SECRET })).toContain('JWT_ACCESS_SECRET');
       expect(failures({ ...prod, BCRYPT_COST: '10' })).toContain('BCRYPT_COST');
       expect(failures({ ...prod, BCRYPT_COST: '12' })).toEqual([]);
+    });
+
+    it('refuses TRUST_PROXY=0 or unset in production', () => {
+      expect(failures({ ...prod, TRUST_PROXY: 0 })).toContain('TRUST_PROXY');
+      expect(failures({ ...prod, TRUST_PROXY: 1 })).toEqual([]);
     });
 
     it('allows the same weak values outside production', () => {

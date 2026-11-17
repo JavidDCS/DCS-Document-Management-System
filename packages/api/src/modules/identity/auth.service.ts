@@ -22,6 +22,7 @@ export interface AuthConfig {
   REAUTH_MAX_AGE_SECONDS: number;
   ALLOWED_EMAIL_DOMAIN: string;
   AUTH_PASSWORD_LOGIN_ENABLED: boolean;
+  TEMPORARY_PASSWORD_MAX_HOURS?: number | undefined;
   AUTH_GOOGLE_AUTO_PROVISION?: boolean | undefined;
   AUTH_GOOGLE_DEFAULT_ROLE?: 'VIEWER' | 'SENDER' | 'ADMIN' | undefined;
   GOOGLE_AUTO_PROVISION?: boolean | undefined;
@@ -131,7 +132,7 @@ export class AuthService {
     });
   }
 
-  /** Counts a failed password and locks the account when the limit is reached. */
+  /** Counts a failed password and locks the account with graduated duration when the limit is reached. */
   private async registerFailure(userId: string, meta: ClientMeta & { requestId?: string | undefined }) {
     const cred = await this.db.passwordCredential.update({
       where: { userId },
@@ -139,14 +140,23 @@ export class AuthService {
       select: { failedLoginCount: true },
     });
     if (cred.failedLoginCount >= this.cfg.LOGIN_MAX_FAILED_ATTEMPTS) {
+      const recentLocks = await this.db.loginEvent.count({
+        where: {
+          userId,
+          outcome: 'LOCKED',
+          createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        },
+      });
+      const multiplier = Math.min(2 ** recentLocks, 96);
+      const lockMinutes = this.cfg.LOGIN_LOCKOUT_MINUTES * multiplier;
       await this.db.$transaction(async (tx) => {
         await tx.passwordCredential.update({
           where: { userId },
-          data: { failedLoginCount: 0, lockedUntil: new Date(Date.now() + this.cfg.LOGIN_LOCKOUT_MINUTES * 60_000) },
+          data: { failedLoginCount: 0, lockedUntil: new Date(Date.now() + lockMinutes * 60_000) },
         });
-        await this.audit(tx, 'ACCOUNT_LOCKED', userId, meta, 'DENIED', { minutes: this.cfg.LOGIN_LOCKOUT_MINUTES });
+        await this.audit(tx, 'ACCOUNT_LOCKED', userId, meta, 'DENIED', { minutes: lockMinutes, multiplier });
       });
-      logger.warn('Account locked after repeated failed sign-ins', { userId });
+      logger.warn('Account locked after repeated failed sign-ins', { userId, lockMinutes, multiplier });
     }
   }
 
@@ -181,6 +191,16 @@ export class AuthService {
       await this.loginEvent(this.db, 'DENIED_INACTIVE', email, user.id, meta);
       await this.audit(this.db, 'LOGIN_FAILED', user.id, meta, 'DENIED', { reason: 'deactivated' });
       throw new HttpError(401, GENERIC_LOGIN_ERROR, 'UNAUTHENTICATED');
+    }
+
+    if (user.credential.mustChangePassword) {
+      const tempMaxAgeMs = (this.cfg.TEMPORARY_PASSWORD_MAX_HOURS ?? 72) * 60 * 60 * 1000;
+      const tempIssuedAt = user.credential.passwordChangedAt ?? user.createdAt;
+      if (Date.now() - tempIssuedAt.getTime() > tempMaxAgeMs) {
+        await this.loginEvent(this.db, 'FAILED_CREDENTIALS', email, user.id, meta);
+        await this.audit(this.db, 'LOGIN_FAILED', user.id, meta, 'DENIED', { reason: 'temporary_password_expired' });
+        throw new HttpError(401, 'Temporary password has expired. Ask an administrator to issue a new one.', 'TEMPORARY_PASSWORD_EXPIRED');
+      }
     }
 
     const now = new Date();

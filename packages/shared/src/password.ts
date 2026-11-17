@@ -1,9 +1,12 @@
+import { TOP_COMMON_PASSWORDS } from './commonPasswords.js';
+
 export const MIN_PASSWORD_LENGTH = 12;
 /** bcrypt only uses the first 72 BYTES; longer passwords are rejected, never silently truncated. */
 export const MAX_PASSWORD_BYTES = 72;
 
 /** Passwords of 12+ characters that still appear in every breach list (lower-case, letters and digits only). */
 const COMMON = new Set([
+  ...TOP_COMMON_PASSWORDS,
   'password1234', 'password12345', 'password123456', 'passw0rd1234', 'p@ssword1234', 'qwertyuiop12', 'qwertyuiop123',
   'qwerty123456', 'qwertyuiopas', 'asdfghjkl123', 'asdfghjklqwe', 'zxcvbnm12345', '123456789012', '1234567890123',
   '12345678901234', '123456123456', '111111111111', '000000000000', 'abcdefghijkl', 'abcdefghijklm', 'abcd12345678',

@@ -113,6 +113,7 @@ export const envObject = z.object({
     .regex(/^[A-Za-z0-9_-]+$/, 'REFRESH_COOKIE_NAME may only contain letters, digits, _ and -')
     .default('dcs_docs_refresh'),
   REAUTH_MAX_AGE_SECONDS: intInRange(30, 3600, 300),
+  TEMPORARY_PASSWORD_MAX_HOURS: intInRange(1, 720, 72),
 
   // Google Workspace sign-in (OIDC Authorization Code + PKCE), an additional login method. Optional until configured.
   AUTH_PASSWORD_LOGIN_ENABLED: flag(true),
@@ -320,6 +321,9 @@ export const envSchema = envObject.superRefine((e, ctx) => {
     }
     if (e.APP_PUBLIC_URL && !e.APP_PUBLIC_URL.startsWith('https://')) {
       fail('APP_PUBLIC_URL', 'APP_PUBLIC_URL must use https in production');
+    }
+    if (e.TRUST_PROXY < 1) {
+      fail('TRUST_PROXY', 'TRUST_PROXY must be at least 1 in production so client IPs and rate limits behind the reverse proxy are not shared');
     }
   }
 });
