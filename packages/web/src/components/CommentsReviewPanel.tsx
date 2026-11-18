@@ -1,5 +1,5 @@
-import type { ReviewCommentDto } from '@dcs-docs/shared';
-import { useEffect, useState } from 'react';
+import type { ReviewCommentDto, ShareLinkDto, ShareLinkStatus } from '@dcs-docs/shared';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api } from '../api';
@@ -10,6 +10,61 @@ import { PdfCanvasViewer } from './pdf/PdfCanvasViewer';
 import { Badge, ErrorBanner, InfoBanner, Spinner, cn } from './ui';
 
 const STATUS_TONE: Record<ReviewCommentDto['status'], 'warn' | 'ok' | 'neutral'> = { OPEN: 'warn', ACCEPTED: 'ok', DISMISSED: 'neutral' };
+const LINK_STATUS_TONE: Record<ShareLinkStatus, 'warn' | 'ok' | 'neutral' | 'bad'> = {
+  SENT: 'neutral',
+  VIEWED: 'neutral',
+  COMMENTED: 'warn',
+  ACCEPTED: 'ok',
+  DISMISSED: 'neutral',
+  REVOKED: 'bad',
+  FAILED: 'bad',
+};
+
+/** Lets staff email a client a one-time, no-login review link for the document's current version, then shows
+ * every link sent so far and its status. This is the one entry point into the whole review flow — before this
+ * exists, "Send documents" only ever attaches the raw PDF, never the reviewable link. */
+function SendForReviewForm({ doc, onSent }: { doc: DocumentDetail; onSent: () => void }) {
+  const [email, setEmail] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setSending(true);
+    setError(null);
+    try {
+      await api.post(`/documents/${doc.id}/share-links`, { recipientEmail: email.trim() });
+      toast.success(`Review link emailed to ${email.trim()}`);
+      setEmail('');
+      onSent();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="flex flex-wrap items-end gap-2">
+      <label className="stack gap-1">
+        <span className="text-xs font-medium">Send for client review</span>
+        <input
+          type="email"
+          required
+          placeholder="client@example.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="input"
+          disabled={sending}
+        />
+      </label>
+      <button type="submit" className="btn primary" disabled={sending || !email.trim()}>
+        {sending ? 'Sending…' : 'Send review link'}
+      </button>
+      {error != null && <ErrorBanner error={error} />}
+    </form>
+  );
+}
 
 /** Staff-facing review of a document's client comments: read-only PDF + pin list, with Accept/Dismiss per
  * comment and a "Stamp & send back" action once every comment is resolved. Bolted onto DocumentDetailPage
@@ -17,6 +72,7 @@ const STATUS_TONE: Record<ReviewCommentDto['status'], 'warn' | 'ok' | 'neutral'>
  * current version's bytes, not the document itself again. */
 export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
   const comments = useLoad(async () => (await api.get<ReviewCommentDto[]>(`/documents/${doc.id}/review-comments`)).data, [doc.id]);
+  const shareLinks = useLoad(async () => (await api.get<ShareLinkDto[]>(`/documents/${doc.id}/share-links`)).data, [doc.id]);
   const [selected, setSelected] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfError, setPdfError] = useState<unknown>(null);
@@ -78,6 +134,23 @@ export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
           Stamp &amp; send back
         </Link>
       </div>
+
+      <div className="mb-4">
+        <SendForReviewForm doc={doc} onSent={shareLinks.reload} />
+      </div>
+
+      {shareLinks.data && shareLinks.data.length > 0 && (
+        <div className="mb-4 stack gap-1">
+          <span className="muted text-xs">Review links sent</span>
+          {shareLinks.data.map((l) => (
+            <div key={l.id} className="row items-center gap-2 text-sm">
+              <Badge tone={LINK_STATUS_TONE[l.status]}>{l.status}</Badge>
+              <span>{l.recipientEmail}</span>
+              <span className="muted text-xs">· {fmtDateTime(l.createdAt)}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {actionError != null && <ErrorBanner error={actionError} />}
       {comments.loading && !comments.data && <Spinner label="Loading comments…" />}

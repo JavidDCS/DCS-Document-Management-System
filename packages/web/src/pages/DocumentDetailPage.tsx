@@ -28,7 +28,7 @@ export function DocumentDetailPage() {
   const { can } = useAuth();
   const doc = useLoad(async () => (await api.get<DocumentDetail>(`/documents/${id}`)).data, [id]);
   const tags = useLoad(async () => (can('documents:read') ? (await api.get<TagDto[]>('/tags')).data : []), []);
-  const [tab, setTab] = useState<TabId>('overview');
+  const [tab, setTab] = useState<TabId>(() => (window.location.hash === '#comments' ? 'comments' : 'overview'));
   const [editing, setEditing] = useState(false);
   const [dialog, setDialog] = useState<null | { kind: 'restore' | 'promote' | 'archive' | 'unarchive' | 'deactivate'; version?: VersionDto }>(null);
   const [preview, setPreview] = useState<VersionDto | null>(null);
