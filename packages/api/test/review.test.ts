@@ -220,18 +220,27 @@ describe.skipIf(skipDb)('external document review: share links, comments, accept
       expect(bare.body.error.code).toBe('CSRF_FAILED');
     });
 
-    it('accepts one open comment, stores client IP/UA, rejects a second while the first is open (409, not a raw DB error), and queues the notify job', async () => {
+    it('accepts several comments on one link -- a plain note and a suggested change -- stores client IP/UA, and queues the notify job', async () => {
       const res = await publicPost(`/public/review/${token}/comments`, { pageNumber: 1, xPct: 0.25, yPct: 0.6, body: 'Please change the counterparty name.' });
       expect(res.status, JSON.stringify(res.body)).toBe(201);
-      expect(res.body.data).toMatchObject({ pageNumber: 1, xPct: 0.25, yPct: 0.6, status: 'OPEN' });
+      expect(res.body.data).toMatchObject({ kind: 'COMMENT', pageNumber: 1, xPct: 0.25, yPct: 0.6, status: 'OPEN', replacementText: null, applied: false });
       const commentId = res.body.data.id;
 
       const row = await prisma.documentReviewComment.findUniqueOrThrow({ where: { id: commentId } });
       expect(row.clientIp).not.toBeNull();
 
-      const again = await publicPost(`/public/review/${token}/comments`, { pageNumber: 1, xPct: 0.1, yPct: 0.1, body: 'a second change' });
-      expect(again.status).toBe(409);
-      expect(again.body.error.code).toBe('CONFLICT');
+      // A second one while the first is still open is now fine: a client raises as many points as they need.
+      const change = await publicPost(`/public/review/${token}/comments`, {
+        kind: 'CHANGE', pageNumber: 1, xPct: 0.1, yPct: 0.2, boxWPct: 0.3, boxHPct: 0.04, originalText: 'Party B', replacementText: 'Acme Solar Pvt Ltd',
+      });
+      expect(change.status, JSON.stringify(change.body)).toBe(201);
+      expect(change.body.data).toMatchObject({ kind: 'CHANGE', boxWPct: 0.3, boxHPct: 0.04, originalText: 'Party B', replacementText: 'Acme Solar Pvt Ltd', status: 'OPEN', applied: false });
+      expect(change.body.data.body).toBe('Change "Party B" to "Acme Solar Pvt Ltd"'); // the server writes the summary line
+
+      // A suggested change must carry its box and new text; a plain note must not.
+      expect((await publicPost(`/public/review/${token}/comments`, { kind: 'CHANGE', pageNumber: 1, xPct: 0.1, yPct: 0.1, replacementText: 'x' })).status).toBe(400);
+      expect((await publicPost(`/public/review/${token}/comments`, { kind: 'CHANGE', pageNumber: 1, xPct: 0.9, yPct: 0.1, boxWPct: 0.3, boxHPct: 0.1, replacementText: 'x' })).status).toBe(400); // runs off the page
+      expect((await publicPost(`/public/review/${token}/comments`, { pageNumber: 1, xPct: 0.1, yPct: 0.1, body: 'note', replacementText: 'x' })).status).toBe(400);
 
       const links = (await admin.get(`/documents/${documentId}/share-links`)).body.data;
       expect(links.find((l: any) => l.id === shareLinkId).status).toBe('COMMENTED');
@@ -250,32 +259,74 @@ describe.skipIf(skipDb)('external document review: share links, comments, accept
       expect(JSON.stringify(list.body)).not.toMatch(/dangerouslySetInnerHTML|<script/i);
     });
 
-    it('accept re-stamps the pinned version into a new CLEAN version, resolves the comment, and consumes the link', async () => {
+    it('accepting only records the decision (no new version); the link closes itself when the LAST open comment is answered', async () => {
       const comments = (await admin.get(`/documents/${documentId}/review-comments`)).body.data;
-      const open = comments.find((c: any) => c.status === 'OPEN');
+      const note = comments.find((c: any) => c.status === 'OPEN' && c.kind === 'COMMENT');
+      const change = comments.find((c: any) => c.status === 'OPEN' && c.kind === 'CHANGE');
 
-      const res = await admin.post(`/review-comments/${open.id}/accept`, {});
-      expect(res.status, JSON.stringify(res.body)).toBe(200);
-      expect(res.body.data.status).toBe('ACCEPTED');
+      const first = await admin.post(`/review-comments/${note.id}/accept`, {});
+      expect(first.status, JSON.stringify(first.body)).toBe(200);
+      expect(first.body.data.status).toBe('ACCEPTED');
+      // One comment is still open, so the client's link keeps working.
+      expect((await admin.get(`/documents/${documentId}/share-links`)).body.data.find((l: any) => l.id === shareLinkId).status).toBe('COMMENTED');
+      expect((await request(app).get(`/api/v1/public/review/${token}`)).status).toBe(200);
 
-      const doc = await admin.get(`/documents/${documentId}`);
-      const versions = doc.body.data.versions;
-      const newest = versions[0];
-      expect(newest.isCurrent).toBe(true);
-      expect(newest.versionNumber).toBe(2);
-      expect(newest.scanStatus).toBe('CLEAN');
+      const second = await admin.post(`/review-comments/${change.id}/accept`, {});
+      expect(second.status).toBe(200);
 
-      const row = await prisma.documentVersion.findUniqueOrThrow({ where: { id: newest.id } });
-      expect((row.scanDetails as any).source).toBe('review_accept');
-      expect((row.scanDetails as any).commentId).toBe(open.id);
-
-      const links = (await admin.get(`/documents/${documentId}/share-links`)).body.data;
-      expect(links.find((l: any) => l.id === shareLinkId).status).toBe('ACCEPTED');
+      expect((await admin.get(`/documents/${documentId}`)).body.data.versions).toHaveLength(1); // nothing was written to the PDF yet
+      expect((await admin.get(`/documents/${documentId}/share-links`)).body.data.find((l: any) => l.id === shareLinkId).status).toBe('ACCEPTED');
 
       for (const path of [`/public/review/${token}`, `/public/review/${token}/content`]) {
         expect((await request(app).get(`/api/v1${path}`)).status).toBe(404);
       }
       expect((await publicPost(`/public/review/${token}/comments`, { pageNumber: 1, xPct: 0.5, yPct: 0.5, body: 'late' })).status).toBe(404);
+    });
+
+    it('apply-changes writes the accepted change into a new CLEAN version; stamp-signature then adds the signature as another', async () => {
+      const applied = await admin.post(`/documents/${documentId}/review/apply-changes`, { shareLinkId });
+      expect(applied.status, JSON.stringify(applied.body)).toBe(200);
+      expect(applied.body.data).toMatchObject({ versionNumber: 2, applied: 1 });
+
+      let versions = (await admin.get(`/documents/${documentId}`)).body.data.versions;
+      expect(versions[0]).toMatchObject({ isCurrent: true, versionNumber: 2, scanStatus: 'CLEAN' });
+      const v2 = await prisma.documentVersion.findUniqueOrThrow({ where: { id: versions[0].id } });
+      expect((v2.scanDetails as any).source).toBe('review_apply');
+      const v1 = await prisma.documentVersion.findUniqueOrThrow({ where: { id: versions[1].id } });
+      expect(v2.sha256).not.toBe(v1.sha256); // the bytes really changed
+
+      const comments = (await admin.get(`/documents/${documentId}/review-comments`)).body.data;
+      expect(comments.find((c: any) => c.kind === 'CHANGE')).toMatchObject({ status: 'ACCEPTED', applied: true });
+      expect(comments.find((c: any) => c.kind === 'COMMENT').applied).toBe(false); // a plain note has nothing to apply
+
+      // Nothing is left to apply, so a second click is a clean 409 and writes no extra version.
+      expect((await admin.post(`/documents/${documentId}/review/apply-changes`, { shareLinkId })).status).toBe(409);
+
+      const signed = await admin.post(`/documents/${documentId}/review/stamp-signature`, {});
+      expect(signed.status, JSON.stringify(signed.body)).toBe(200);
+      expect(signed.body.data.versionNumber).toBe(3);
+      versions = (await admin.get(`/documents/${documentId}`)).body.data.versions;
+      const v3 = await prisma.documentVersion.findUniqueOrThrow({ where: { id: versions[0].id } });
+      expect((v3.scanDetails as any)).toMatchObject({ source: 'review_signature', signatureAssetId: defaultSignatureId });
+
+      // Stamping the same version twice would draw the signature on top of itself.
+      expect((await admin.post(`/documents/${documentId}/review/stamp-signature`, {})).status).toBe(409);
+      expect((await admin.get(`/documents/${documentId}`)).body.data.versions).toHaveLength(3);
+    });
+
+    it('a signing send mints a fresh link to the same person, attaches the final PDF, and uses the signing wording', async () => {
+      mockProvider.sentMessages = [];
+      const res = await createLink(documentId, { purpose: 'SIGNING', previousLinkId: shareLinkId });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(res.body.data.previousLinkId).toBe(shareLinkId);
+      await drain(); // the email leaves through the job queue
+
+      const link = await prisma.documentShareLink.findUniqueOrThrow({ where: { id: res.body.data.id } });
+      const msg = await prisma.emailMessage.findUniqueOrThrow({ where: { id: link.initialEmailMessageId! } });
+      expect(msg.subject).toMatch(/review and sign/i);
+      const sent = mockProvider.sentMessages.at(-1)!.raw.toString('latin1');
+      expect(sent).toMatch(/application\/pdf/i); // the PDF itself travelled with the email
+      expect(sent).toMatch(/Content-Disposition: attachment/i);
     });
 
     it('resend mints a brand-new token; it is rejected unless the previous link already reached ACCEPTED or DISMISSED', async () => {
@@ -292,6 +343,81 @@ describe.skipIf(skipDb)('external document review: share links, comments, accept
       const newToken = await extractToken(resend.body.data.id);
       expect(newToken).not.toBe(token);
       expect((await request(app).get(`/api/v1/public/review/${newToken}`)).status).toBe(200);
+    });
+  });
+
+  describe('review round ordering: answer everything, apply changes, then sign', () => {
+    const box = { kind: 'CHANGE', pageNumber: 1, xPct: 0.1, yPct: 0.2, boxWPct: 0.3, boxHPct: 0.04 };
+
+    async function startRound(replacementText: string) {
+      const documentId = await createActiveDocument(uniq('Round doc'));
+      const link = await createLink(documentId);
+      const token = await extractToken(link.body.data.id);
+      const c = await publicPost(`/public/review/${token}/comments`, { ...box, replacementText });
+      expect(c.status, JSON.stringify(c.body)).toBe(201);
+      return { documentId, shareLinkId: link.body.data.id as string, token, commentId: c.body.data.id as string };
+    }
+
+    it('refuses to apply while any comment on the link is still open', async () => {
+      const r = await startRound('Acme Solar');
+      const res = await admin.post(`/documents/${r.documentId}/review/apply-changes`, { shareLinkId: r.shareLinkId });
+      expect(res.status).toBe(409);
+      expect(res.body.error.message).toMatch(/open comment/i);
+    });
+
+    it('refuses to stamp the signature while an accepted change is still waiting to be applied -- the signature goes last', async () => {
+      const r = await startRound('Acme Solar');
+      await admin.post(`/review-comments/${r.commentId}/accept`, {});
+      const early = await admin.post(`/documents/${r.documentId}/review/stamp-signature`, {});
+      expect(early.status).toBe(409);
+      expect(early.body.error.message).toMatch(/apply/i);
+
+      expect((await admin.post(`/documents/${r.documentId}/review/apply-changes`, { shareLinkId: r.shareLinkId })).status).toBe(200);
+      expect((await admin.post(`/documents/${r.documentId}/review/stamp-signature`, {})).status).toBe(200);
+    });
+
+    it('a dismissed change is never applied: with nothing accepted there is nothing to write', async () => {
+      const r = await startRound('Acme Solar');
+      await admin.post(`/review-comments/${r.commentId}/dismiss`, {});
+      const res = await admin.post(`/documents/${r.documentId}/review/apply-changes`, { shareLinkId: r.shareLinkId });
+      expect(res.status).toBe(409);
+      expect((await admin.get(`/documents/${r.documentId}`)).body.data.versions).toHaveLength(1);
+    });
+
+    it('text the PDF font cannot draw is a clear 400 and leaves the document untouched', async () => {
+      const r = await startRound('日本語');
+      await admin.post(`/review-comments/${r.commentId}/accept`, {});
+      const res = await admin.post(`/documents/${r.documentId}/review/apply-changes`, { shareLinkId: r.shareLinkId });
+      expect(res.status, JSON.stringify(res.body)).toBe(400);
+      expect(res.body.error.message).toMatch(/cannot draw/i);
+      expect((await admin.get(`/documents/${r.documentId}`)).body.data.versions).toHaveLength(1);
+      // The comment stays accepted-but-unapplied, so staff can still dismiss/handle it; nothing was half-written.
+      const row = await prisma.documentReviewComment.findUniqueOrThrow({ where: { id: r.commentId } });
+      expect(row.resultingVersionId).toBeNull();
+    });
+
+    it('refuses to apply on top of a version uploaded after the link was sent (the client\'s marks would no longer line up)', async () => {
+      const r = await startRound('Acme Solar');
+      await admin.post(`/review-comments/${r.commentId}/accept`, {});
+      const upload = await request(app)
+        .post(`/api/v1/documents/${r.documentId}/versions`)
+        .set(admin.auth())
+        .attach('file', makePdf({ body: 'BT /F1 12 Tf 72 700 Td (A completely different upload) Tj ET' }), { filename: 'doc.pdf', contentType: 'application/pdf' });
+      expect(upload.status, JSON.stringify(upload.body)).toBe(201);
+      await drain();
+      // An upload only becomes the current version once someone promotes it.
+      const newest = (await admin.get(`/documents/${r.documentId}`)).body.data.versions[0];
+      expect(newest.versionNumber).toBe(2);
+      expect((await admin.post(`/documents/${r.documentId}/versions/${newest.id}/promote`, {})).status).toBe(200);
+      const res = await admin.post(`/documents/${r.documentId}/review/apply-changes`, { shareLinkId: r.shareLinkId });
+      expect(res.status).toBe(409);
+      expect(res.body.error.message).toMatch(/newer version/i);
+    });
+
+    it('is off-limits to a role without documents:review', async () => {
+      const r = await startRound('Acme Solar');
+      expect((await sender.post(`/documents/${r.documentId}/review/apply-changes`, { shareLinkId: r.shareLinkId })).status).toBe(403);
+      expect((await sender.post(`/documents/${r.documentId}/review/stamp-signature`, {})).status).toBe(403);
     });
   });
 

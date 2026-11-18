@@ -203,7 +203,7 @@ export function DocumentDetailPage() {
 
       {tab === 'access' && manage && <AccessTab docId={d.id} />}
 
-      {tab === 'comments' && canReview && <CommentsReviewPanel doc={d} />}
+      {tab === 'comments' && canReview && <CommentsReviewPanel doc={d} onDocumentChanged={doc.reload} />}
 
       {preview && <PreviewModal doc={d} version={preview} onClose={() => setPreview(null)} />}
       {dialog?.kind === 'promote' && dialog.version && (

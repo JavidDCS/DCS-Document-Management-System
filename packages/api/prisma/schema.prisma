@@ -531,9 +531,15 @@ model DocumentShareLink {
 model DocumentReviewComment {
   id                 String    @id @default(uuid()) @db.Uuid
   shareLinkId        String    @map("share_link_id") @db.Uuid
+  kind               String    @default("COMMENT") // COMMENT|CHANGE (CHECK in SQL)
   pageNumber         Int       @map("page_number")
   xPct               Float     @map("x_pct")
   yPct               Float     @map("y_pct")
+  /// CHANGE only: the box around the text to replace, as a fraction of the page; (xPct, yPct) is its top-left corner.
+  boxWPct            Float?    @map("box_w_pct")
+  boxHPct            Float?    @map("box_h_pct")
+  originalText       String?   @map("original_text")
+  replacementText    String?   @map("replacement_text")
   body               String
   status             String    @default("OPEN") // OPEN|ACCEPTED|DISMISSED (CHECK in SQL)
   resolvedById       String?   @map("resolved_by_id") @db.Uuid
@@ -550,6 +556,7 @@ model DocumentReviewComment {
 
   @@index([shareLinkId])
   @@index([status])
+  @@index([kind])
   @@map("document_review_comments")
 }
 

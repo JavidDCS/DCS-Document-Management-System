@@ -4,13 +4,14 @@ import { useParams } from 'react-router-dom';
 import { ApiError, errorMessage } from '../../api';
 import { getReviewContent, getReviewLink, submitComment } from '../../api/publicClient';
 import { AuthShell } from '../../components/AuthShell';
-import { PdfCanvasViewer, type PlacedPin } from '../../components/pdf/PdfCanvasViewer';
+import { PdfCanvasViewer, type PlacedBox, type PlacedPin } from '../../components/pdf/PdfCanvasViewer';
 import { Badge, ErrorBanner, InfoBanner, Spinner } from '../../components/ui';
 import { useTitle } from '../../hooks';
 import { fmtDateTime } from '../../lib/format';
 import { classifyReviewLinkState, REVIEW_LINK_MESSAGES } from './reviewLinkState';
 
 const STATUS_TONE: Record<ReviewCommentDto['status'], 'warn' | 'ok' | 'neutral'> = { OPEN: 'warn', ACCEPTED: 'ok', DISMISSED: 'neutral' };
+const STATUS_LABEL: Record<ReviewCommentDto['status'], string> = { OPEN: 'Waiting for review', ACCEPTED: 'Accepted', DISMISSED: 'Not taken forward' };
 
 export function ReviewLinkPage() {
   useTitle('Review document');
@@ -24,8 +25,11 @@ export function ReviewLinkPage() {
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfError, setPdfError] = useState<string | null>(null);
 
-  const [pendingPin, setPendingPin] = useState<PlacedPin | null>(null);
+  // What the client is composing: a click leaves a pin (a comment), a drag draws a box (a suggested change).
+  const [pending, setPending] = useState<PlacedPin | PlacedBox | null>(null);
   const [draft, setDraft] = useState('');
+  const [replacement, setReplacement] = useState('');
+  const [original, setOriginal] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -68,30 +72,52 @@ export function ReviewLinkPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [info?.status, token]);
 
-  const hasOpenComment = comments.some((c) => c.status === 'OPEN');
+  const pendingIsChange = pending !== null && 'wPct' in pending;
+  const canSave = pending !== null && (pendingIsChange ? replacement.trim().length > 0 : draft.trim().length > 0);
 
   function handlePlacePin(pos: PlacedPin) {
     setSubmitError(null);
-    setPendingPin(pos);
+    setPending(pos);
+  }
+
+  function handlePlaceBox(box: PlacedBox) {
+    setSubmitError(null);
+    setPending(box);
   }
 
   function cancelComposer() {
-    setPendingPin(null);
+    setPending(null);
     setDraft('');
+    setReplacement('');
+    setOriginal('');
     setSubmitError(null);
   }
 
   async function saveComment() {
-    if (!pendingPin || !draft.trim()) return;
+    if (!pending || !canSave) return;
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const created = await submitComment(token, { pageNumber: pendingPin.pageNumber, xPct: pendingPin.xPct, yPct: pendingPin.yPct, body: draft.trim() });
+      const created = await submitComment(
+        token,
+        'wPct' in pending
+          ? {
+              kind: 'CHANGE',
+              pageNumber: pending.pageNumber,
+              xPct: pending.xPct,
+              yPct: pending.yPct,
+              boxWPct: pending.wPct,
+              boxHPct: pending.hPct,
+              originalText: original.trim() || undefined,
+              replacementText: replacement.trim(),
+              body: draft.trim() || undefined,
+            }
+          : { kind: 'COMMENT', pageNumber: pending.pageNumber, xPct: pending.xPct, yPct: pending.yPct, body: draft.trim() }
+      );
       setComments((prev) => [...prev, created]);
-      setPendingPin(null);
-      setDraft('');
+      cancelComposer();
     } catch (e) {
-      // Draft text is intentionally preserved on failure so the client doesn't have to retype it.
+      // What the client typed is intentionally preserved on failure so they do not have to retype it.
       setSubmitError(e instanceof ApiError ? e.message : errorMessage(e));
     } finally {
       setSubmitting(false);
@@ -132,8 +158,12 @@ export function ReviewLinkPage() {
       <div className="stack gap-5" aria-labelledby="review-title">
         <div>
           <h1 id="review-title" className="text-[26px]">{ready.documentName}</h1>
-          <p className="muted mt-1.5 text-sm">Review the document below. Click anywhere on a page to leave a comment at that spot.</p>
-          <p className="muted mt-1 text-xs">This link expires {fmtDateTime(ready.expiresAt)}.</p>
+          <p className="muted mt-1.5 text-sm">Read the document below, then tell us what you would like changed. You can add as many comments as you need.</p>
+          <ul className="muted mt-2 list-disc pl-5 text-sm">
+            <li><strong>To leave a comment:</strong> click the spot on the page.</li>
+            <li><strong>To change a name, price, date or period:</strong> drag a box around that text, then type the new value.</li>
+          </ul>
+          <p className="muted mt-2 text-xs">This link expires {fmtDateTime(ready.expiresAt)}.</p>
         </div>
 
         {pdfError && <ErrorBanner message={pdfError} />}
@@ -147,37 +177,46 @@ export function ReviewLinkPage() {
           <PdfCanvasViewer
             fileUrl={pdfUrl}
             comments={comments}
-            onPlacePin={hasOpenComment ? undefined : handlePlacePin}
+            onPlacePin={handlePlacePin}
+            onPlaceBox={handlePlaceBox}
+            pending={pending}
             selectedCommentId={null}
           />
         )}
 
-        {comments.length === 0 && !pendingPin && <InfoBanner>Click anywhere on the document to leave a comment.</InfoBanner>}
+        {comments.length === 0 && !pending && <InfoBanner>Nothing added yet. Click the document to comment, or drag a box around text you want changed.</InfoBanner>}
 
-        {hasOpenComment && !pendingPin && (
-          <InfoBanner kind="warn">
-            A comment is already waiting on review for this link. Only one open comment is allowed per link — ask the sender for a new link if you need to raise something else.
-          </InfoBanner>
-        )}
+        {pending && (
+          <div className="stack gap-3 rounded-xl border bg-muted/30 p-4">
+            <h2 className="!mb-0 text-sm font-semibold">{pendingIsChange ? `Suggest a change (page ${pending.pageNumber})` : `Your comment (page ${pending.pageNumber})`}</h2>
 
-        {pendingPin && (
-          <div className="stack gap-2 rounded-xl border bg-muted/30 p-4">
-            <label className="field">
-              <span>Your comment (page {pendingPin.pageNumber})</span>
-              <textarea
-                rows={4}
-                maxLength={2000}
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder="Describe the change you'd like…"
-                autoFocus
-              />
-            </label>
+            {pendingIsChange ? (
+              <>
+                <label className="field">
+                  <span>Text in the box today <span className="muted">(optional, helps us find it)</span></span>
+                  <input type="text" maxLength={300} value={original} onChange={(e) => setOriginal(e.target.value)} placeholder="e.g. [Counterparty Legal Name]" />
+                </label>
+                <label className="field">
+                  <span>Change it to</span>
+                  <input type="text" maxLength={300} value={replacement} onChange={(e) => setReplacement(e.target.value)} placeholder="e.g. Acme Solar Pvt Ltd" autoFocus />
+                </label>
+                <label className="field">
+                  <span>Note <span className="muted">(optional)</span></span>
+                  <textarea rows={2} maxLength={2000} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Anything we should know about this change" />
+                </label>
+              </>
+            ) : (
+              <label className="field">
+                <span>Your comment</span>
+                <textarea rows={4} maxLength={2000} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Describe what you would like to change…" autoFocus />
+              </label>
+            )}
+
             {submitError && <ErrorBanner message={submitError} />}
             <div className="row end">
               <button type="button" className="btn" onClick={cancelComposer} disabled={submitting}>Cancel</button>
-              <button type="button" className="btn primary" onClick={saveComment} disabled={submitting || !draft.trim()}>
-                {submitting ? 'Saving…' : 'Save comment'}
+              <button type="button" className="btn primary" onClick={saveComment} disabled={submitting || !canSave}>
+                {submitting ? 'Saving…' : pendingIsChange ? 'Save suggested change' : 'Save comment'}
               </button>
             </div>
           </div>
@@ -185,16 +224,26 @@ export function ReviewLinkPage() {
 
         {comments.length > 0 && (
           <div className="stack gap-2">
-            <h2 className="!mb-0 text-sm font-semibold">Comments on this link</h2>
+            <h2 className="!mb-0 text-sm font-semibold">Your comments ({comments.length})</h2>
+            <p className="muted m-0 text-xs">Our team has been told. You will get the updated document from the sender once they have gone through these.</p>
             <ol className="m-0 list-none stack gap-2 p-0">
               {comments.map((c) => (
                 <li key={c.id} className="rounded-lg border p-3 text-sm">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="muted text-xs">Page {c.pageNumber}</span>
-                    <Badge tone={STATUS_TONE[c.status]}>{c.status}</Badge>
+                    <span className="muted text-xs">
+                      {c.kind === 'CHANGE' ? 'Suggested change' : 'Comment'} · page {c.pageNumber}
+                    </span>
+                    <Badge tone={STATUS_TONE[c.status]}>{STATUS_LABEL[c.status]}</Badge>
                   </div>
                   {/* Plain text only: a client's comment is attacker-controlled input, never rendered as HTML. */}
-                  <p className="mb-0 mt-1 whitespace-pre-wrap">{c.body}</p>
+                  {c.kind === 'CHANGE' ? (
+                    <p className="mb-0 mt-1">
+                      {c.originalText ? <span className="line-through">{c.originalText}</span> : <span className="muted">(text in the box)</span>}
+                      {' → '}
+                      <strong>{c.replacementText}</strong>
+                    </p>
+                  ) : null}
+                  {c.kind === 'COMMENT' || !c.body.startsWith('Change ') ? <p className="mb-0 mt-1 whitespace-pre-wrap">{c.body}</p> : null}
                 </li>
               ))}
             </ol>

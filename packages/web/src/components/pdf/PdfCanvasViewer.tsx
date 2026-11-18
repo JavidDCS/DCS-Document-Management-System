@@ -2,10 +2,10 @@ import type { ReviewCommentDto } from '@dcs-docs/shared';
 import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
 import { ErrorBanner, Spinner, cn } from '../ui';
 import './pdfWorker';
-import { clickToPct, pctToStyle } from './pinMath';
+import { boxToStyle, dragToSelection, pctToStyle } from './pinMath';
 
 export interface PlacedPin {
   pageNumber: number;
@@ -13,12 +13,22 @@ export interface PlacedPin {
   yPct: number;
 }
 
+/** A box drawn around the text to change. (xPct, yPct) is its top-left corner; sizes are fractions of the page. */
+export interface PlacedBox extends PlacedPin {
+  wPct: number;
+  hPct: number;
+}
+
 export interface PdfCanvasViewerProps {
   /** URL (http(s) or blob:) of the PDF bytes to render. */
   fileUrl: string;
   comments: ReviewCommentDto[];
-  /** Omit to render read-only (staff review): pins are selectable but new ones cannot be placed. */
+  /** Omit both place handlers to render read-only (staff review): marks are selectable but new ones cannot be drawn. */
   onPlacePin?: (pos: PlacedPin) => void;
+  /** Called when the reader drags a box instead of clicking. Without it a drag is ignored. */
+  onPlaceBox?: (box: PlacedBox) => void;
+  /** The mark being composed right now, shown so the reader sees what the comment box below refers to. */
+  pending?: PlacedPin | PlacedBox | null;
   selectedCommentId?: string | null;
   onSelectComment?: (id: string) => void;
 }
@@ -29,11 +39,28 @@ const STATUS_DOT: Record<ReviewCommentDto['status'], string> = {
   DISMISSED: 'border-slate-400 bg-slate-300 opacity-60',
 };
 
+const STATUS_BOX: Record<ReviewCommentDto['status'], string> = {
+  OPEN: 'border-amber-600 bg-amber-300/30',
+  ACCEPTED: 'border-emerald-600 bg-emerald-300/30',
+  DISMISSED: 'border-slate-400 bg-slate-300/20 opacity-60',
+};
+
 const MIN_SCALE = 0.5;
 const MAX_SCALE = 3;
 
-/** Renders one PDF page at a time to a canvas, with an overlay for comment pins. Not continuous scroll. */
-export function PdfCanvasViewer({ fileUrl, comments, onPlacePin, selectedCommentId, onSelectComment }: PdfCanvasViewerProps) {
+interface Drag {
+  sx: number;
+  sy: number;
+  ex: number;
+  ey: number;
+}
+
+function isBox(p: PlacedPin | PlacedBox): p is PlacedBox {
+  return 'wPct' in p;
+}
+
+/** Renders one PDF page at a time to a canvas, with an overlay for comment pins and suggested-change boxes. Not continuous scroll. */
+export function PdfCanvasViewer({ fileUrl, comments, onPlacePin, onPlaceBox, pending, selectedCommentId, onSelectComment }: PdfCanvasViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTokenRef = useRef(0);
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
@@ -43,6 +70,9 @@ export function PdfCanvasViewer({ fileUrl, comments, onPlacePin, selectedComment
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [drag, setDrag] = useState<Drag | null>(null);
+
+  const interactive = Boolean(onPlacePin || onPlaceBox);
 
   useEffect(() => {
     let alive = true;
@@ -98,17 +128,47 @@ export function PdfCanvasViewer({ fileUrl, comments, onPlacePin, selectedComment
     };
   }, [doc, page, scale]);
 
-  const handleOverlayClick = useCallback(
-    (e: MouseEvent<HTMLDivElement>) => {
-      if (!onPlacePin) return;
-      const rect = e.currentTarget.getBoundingClientRect();
-      const { xPct, yPct } = clickToPct(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height);
-      onPlacePin({ pageNumber: page, xPct, yPct });
+  // Pointer events (not click) so one gesture covers both: press-release = a pin, press-drag-release = a box.
+  // setPointerCapture keeps the drag alive if the pointer leaves the page, and it works for mouse, touch and pen.
+  const offsetIn = (e: PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top, width: rect.width, height: rect.height };
+  };
+
+  const handlePointerDown = useCallback(
+    (e: PointerEvent<HTMLDivElement>) => {
+      if (!interactive || e.button !== 0) return;
+      const { x, y } = offsetIn(e);
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setDrag({ sx: x, sy: y, ex: x, ey: y });
     },
-    [onPlacePin, page]
+    [interactive]
   );
 
-  const pinsOnPage = comments.filter((c) => c.pageNumber === page);
+  const handlePointerMove = useCallback((e: PointerEvent<HTMLDivElement>) => {
+    const { x, y } = offsetIn(e);
+    setDrag((d) => (d ? { ...d, ex: x, ey: y } : d));
+  }, []);
+
+  const handlePointerUp = useCallback(
+    (e: PointerEvent<HTMLDivElement>) => {
+      if (!drag) return;
+      const { x, y, width, height } = offsetIn(e);
+      setDrag(null);
+      const sel = dragToSelection(drag.sx, drag.sy, x, y, width, height);
+      if (sel.kind === 'box') {
+        if (onPlaceBox) onPlaceBox({ pageNumber: page, xPct: sel.xPct, yPct: sel.yPct, wPct: sel.wPct, hPct: sel.hPct });
+        else onPlacePin?.({ pageNumber: page, xPct: sel.xPct, yPct: sel.yPct });
+      } else {
+        onPlacePin?.({ pageNumber: page, xPct: sel.xPct, yPct: sel.yPct });
+      }
+    },
+    [drag, onPlaceBox, onPlacePin, page]
+  );
+
+  const marksOnPage = comments.filter((c) => c.pageNumber === page);
+  const pendingOnPage = pending && pending.pageNumber === page ? pending : null;
+  const liveBox = drag && Math.hypot(drag.ex - drag.sx, drag.ey - drag.sy) >= 6 && size.width > 0 ? dragToSelection(drag.sx, drag.sy, drag.ex, drag.ey, size.width, size.height) : null;
 
   return (
     <div className="stack gap-3">
@@ -147,26 +207,57 @@ export function PdfCanvasViewer({ fileUrl, comments, onPlacePin, selectedComment
         <div className="relative inline-block" style={{ width: size.width || undefined, height: size.height || undefined }}>
           <canvas ref={canvasRef} className="block" />
           <div
-            className="absolute left-0 top-0 h-full w-full"
-            style={{ cursor: onPlacePin ? 'crosshair' : 'default' }}
-            onClick={handleOverlayClick}
-            role={onPlacePin ? 'button' : undefined}
-            aria-label={onPlacePin ? 'Click to place a comment pin' : undefined}
+            className="absolute left-0 top-0 h-full w-full select-none"
+            style={{ cursor: interactive ? 'crosshair' : 'default', touchAction: interactive ? 'none' : undefined }}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={() => setDrag(null)}
+            role={interactive ? 'application' : undefined}
+            aria-label={interactive ? 'Click to leave a comment, or drag a box around text you want changed' : undefined}
           >
-            {pinsOnPage.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                className={cn('absolute size-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 shadow-md', STATUS_DOT[c.status], selectedCommentId === c.id && 'ring-2 ring-primary ring-offset-1')}
-                style={pctToStyle(c.xPct, c.yPct)}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onSelectComment?.(c.id);
-                }}
-                aria-label={`${c.status.toLowerCase()} comment pin on page ${c.pageNumber}`}
-                title={c.body}
-              />
-            ))}
+            {marksOnPage.map((c) =>
+              c.kind === 'CHANGE' && c.boxWPct !== null && c.boxHPct !== null ? (
+                <button
+                  key={c.id}
+                  type="button"
+                  className={cn('absolute border-2 border-dashed', STATUS_BOX[c.status], selectedCommentId === c.id && 'ring-2 ring-primary ring-offset-1')}
+                  style={boxToStyle(c.xPct, c.yPct, c.boxWPct, c.boxHPct)}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectComment?.(c.id);
+                  }}
+                  aria-label={`${c.status.toLowerCase()} suggested change on page ${c.pageNumber}`}
+                  title={c.replacementText ? `Change to: ${c.replacementText}` : c.body}
+                />
+              ) : (
+                <button
+                  key={c.id}
+                  type="button"
+                  className={cn('absolute size-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 shadow-md', STATUS_DOT[c.status], selectedCommentId === c.id && 'ring-2 ring-primary ring-offset-1')}
+                  style={pctToStyle(c.xPct, c.yPct)}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectComment?.(c.id);
+                  }}
+                  aria-label={`${c.status.toLowerCase()} comment pin on page ${c.pageNumber}`}
+                  title={c.body}
+                />
+              )
+            )}
+
+            {/* What the reader is composing right now (and the live rectangle while dragging). */}
+            {pendingOnPage &&
+              (isBox(pendingOnPage) ? (
+                <div className="pointer-events-none absolute border-2 border-primary bg-primary/15" style={boxToStyle(pendingOnPage.xPct, pendingOnPage.yPct, pendingOnPage.wPct, pendingOnPage.hPct)} />
+              ) : (
+                <div className="pointer-events-none absolute size-5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-primary bg-primary/40" style={pctToStyle(pendingOnPage.xPct, pendingOnPage.yPct)} />
+              ))}
+            {liveBox && liveBox.kind === 'box' && (
+              <div className="pointer-events-none absolute border-2 border-dashed border-primary bg-primary/10" style={boxToStyle(liveBox.xPct, liveBox.yPct, liveBox.wPct, liveBox.hPct)} />
+            )}
           </div>
         </div>
       </div>

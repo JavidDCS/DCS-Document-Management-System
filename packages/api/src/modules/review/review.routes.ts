@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { createReviewCommentSchema, createShareLinkSchema, reviewCommentDecisionSchema, uuidParamSchema } from '@dcs-docs/shared';
+import { applyReviewChangesSchema, createReviewCommentSchema, createShareLinkSchema, reviewCommentDecisionSchema, stampSignatureSchema, uuidParamSchema } from '@dcs-docs/shared';
 import type { AppContext } from '../../app.js';
 import { can, PUBLIC, type SecureRouter } from '../../platform/auth/secureRouter.js';
 import { asyncHandler } from '../../platform/http/errorHandler.js';
@@ -53,14 +53,35 @@ export function registerReviewRoutes(secure: SecureRouter, ctx: AppContext, revi
     })
   );
 
+  // Accepting only records "yes, make this change"; the PDF is written by apply-changes below, which is the step that re-authenticates.
   secure.post(
     '/review-comments/:commentId/accept',
-    can('documents:review', { reauth: true }),
-    validate({ params: commentParamSchema, body: reviewCommentDecisionSchema.extend({ signatureAssetId: z.uuid().optional() }) }),
+    can('documents:review'),
+    validate({ params: commentParamSchema, body: reviewCommentDecisionSchema }),
     asyncHandler(async (req, res) => {
       const { commentId } = req.params as unknown as z.infer<typeof commentParamSchema>;
-      const body = req.body as { resolutionNote?: string; signatureAssetId?: string };
-      res.json({ data: await review.acceptComment(req.auth!, commentId, { signatureAssetId: body.signatureAssetId }, auditContext(req)) });
+      const body = req.body as z.infer<typeof reviewCommentDecisionSchema>;
+      res.json({ data: await review.acceptComment(req.auth!, commentId, { resolutionNote: body.resolutionNote }, auditContext(req)) });
+    })
+  );
+
+  secure.post(
+    '/documents/:id/review/apply-changes',
+    can('documents:review', { reauth: true }),
+    validate({ params: uuidParamSchema, body: applyReviewChangesSchema }),
+    asyncHandler(async (req, res) => {
+      const { id } = req.params as unknown as z.infer<typeof uuidParamSchema>;
+      res.json({ data: await review.applyChanges(req.auth!, id, req.body as z.infer<typeof applyReviewChangesSchema>, auditContext(req)) });
+    })
+  );
+
+  secure.post(
+    '/documents/:id/review/stamp-signature',
+    can('documents:review', { reauth: true }),
+    validate({ params: uuidParamSchema, body: stampSignatureSchema }),
+    asyncHandler(async (req, res) => {
+      const { id } = req.params as unknown as z.infer<typeof uuidParamSchema>;
+      res.json({ data: await review.stampSignature(req.auth!, id, req.body as z.infer<typeof stampSignatureSchema>, auditContext(req)) });
     })
   );
 

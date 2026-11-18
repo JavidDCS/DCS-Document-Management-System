@@ -1,6 +1,6 @@
 import {
   ChevronRight, FilePlus2, FileText, FileType2, History, LayoutDashboard, Lock, LogOut, Mail, Menu, Monitor, Moon, PanelLeftClose, PanelLeftOpen,
-  ScrollText, Search, Send, Sun, Tags, User, Users, X, ShieldCheck, Keyboard, type LucideIcon,
+  ScrollText, Search, Send, Sun, Tags, User, Users, X, ShieldCheck, Keyboard, PenLine, type LucideIcon,
 } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 import { Link, Navigate, NavLink, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
@@ -26,6 +26,7 @@ import { SentDetailPage, SentListPage } from './pages/SentPages';
 import { AccountSettingsPage } from './pages/AccountSettingsPage';
 import { AdminAuditPage } from './pages/admin/AdminAuditPage';
 import { AdminDocumentTypesPage, DocumentTypeBuilderPage } from './pages/admin/DocumentTypesPages';
+import { AdminSignaturesPage } from './pages/admin/AdminSignaturesPage';
 import { AdminTagsPage } from './pages/admin/AdminTagsPage';
 import { AdminTemplatesPage } from './pages/admin/AdminTemplatesPage';
 import { AdminUsersPage } from './pages/admin/AdminUsersPage';
@@ -57,7 +58,7 @@ function Guard({ perm, anyOf, children }: { perm?: Permission; anyOf?: Permissio
 
 const CRUMBS: Record<string, string> = {
   documents: 'Documents', new: 'Upload', send: 'Send documents', sent: 'Sent history', settings: 'Settings', gmail: 'Gmail connection', account: 'My account',
-  admin: 'Administration', users: 'Users', 'document-types': 'Document types', tags: 'Tags', templates: 'Email templates', audit: 'Audit log',
+  admin: 'Administration', users: 'Users', 'document-types': 'Document types', tags: 'Tags', templates: 'Email templates', signatures: 'Signature', audit: 'Audit log',
 };
 
 function Breadcrumbs() {
@@ -204,7 +205,7 @@ function Layout() {
       <Icon className="size-[18px] shrink-0" aria-hidden="true" /><span className="nav-label">{label}</span>
     </NavLink>
   );
-  const admin = canAny('users:read', 'doc_types:manage', 'templates:manage', 'audit:read', 'documents:manage');
+  const admin = canAny('users:read', 'doc_types:manage', 'templates:manage', 'audit:read', 'documents:manage', 'signatures:manage');
   const appConfig = (typeof window !== 'undefined' && (window as any).__APP_CONFIG__) || {};
   const companyName = appConfig.companyName || (import.meta as any).env.VITE_COMPANY_NAME || (import.meta as any).env.APP_COMPANY_NAME || 'DeCircle Solar';
 
@@ -229,6 +230,7 @@ function Layout() {
             {can('doc_types:manage') && link('/admin/document-types', 'Document types', FileType2)}
             {can('documents:manage') && link('/admin/tags', 'Tags', Tags)}
             {can('templates:manage') && link('/admin/templates', 'Email templates', Mail)}
+            {can('signatures:manage') && link('/admin/signatures', 'Signature', PenLine)}
             {can('users:read') && link('/admin/users', 'Users', Users)}
             {can('audit:read') && link('/admin/audit', 'Audit log', ScrollText)}
             <div className="nav-group">Account</div>
@@ -318,6 +320,7 @@ export default function App() {
           <Route path="admin/document-types/:id" element={<Guard perm="doc_types:manage"><DocumentTypeBuilderPage /></Guard>} />
           <Route path="admin/tags" element={<Guard perm="documents:manage"><AdminTagsPage /></Guard>} />
           <Route path="admin/templates" element={<Guard perm="templates:manage"><AdminTemplatesPage /></Guard>} />
+          <Route path="admin/signatures" element={<Guard perm="signatures:manage"><AdminSignaturesPage /></Guard>} />
           <Route path="admin/audit" element={<Guard perm="audit:read"><AdminAuditPage /></Guard>} />
           <Route path="*" element={<Empty icon={FileText} title="Page not found" action={<Link className="btn primary" to="/">Back to the dashboard</Link>}>The page you are looking for does not exist.</Empty>} />
         </Route>

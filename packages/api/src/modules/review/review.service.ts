@@ -1,14 +1,16 @@
 import { Readable } from 'node:stream';
-import { Prisma, type PrismaClient } from '@prisma/client';
+import type { DocumentVersion, Prisma, PrismaClient } from '@prisma/client';
 import {
   permissionsForRoles,
   rolesHavePermission,
   ROLES,
+  type ApplyReviewChangesInput,
   type CreateReviewCommentInput,
   type CreateShareLinkInput,
   type DraftInput,
   type PublicReviewLinkInfo,
   type ReviewCommentDto,
+  type ReviewCommentKind,
   type ReviewCommentStatus,
   type Role,
   type SendInput,
@@ -27,7 +29,7 @@ import { toRoles } from '../identity/auth.service.js';
 import { generateRefreshToken, hashToken } from '../identity/tokens.js';
 import { enqueueJob, type JobContext } from '../jobs/jobs.js';
 import type { FileService } from '../storage/fileService.js';
-import { pageCount, stamp } from './pdfStamp.service.js';
+import { applyReplacements, pageCount, stamp, UnsupportedTextError } from './pdfStamp.service.js';
 
 export interface RequestMeta {
   ip: string | null;
@@ -42,6 +44,24 @@ export interface ReviewConfig {
 
 /** Statuses a share link may be viewed, commented on through, or have its content read through. Anything else 404s. */
 const USABLE_LINK_STATUSES = new Set(['SENT', 'VIEWED', 'COMMENTED']);
+
+/** A client may raise many comments, but a leaked link must not be a way to flood the team's inbox and database. */
+const MAX_COMMENTS_PER_LINK = 100;
+
+/** `scanDetails.source` of the versions this module creates; used to tell "derived from the reviewed PDF" apart from a fresh upload. */
+const SOURCE_APPLY = 'review_apply';
+const SOURCE_SIGNATURE = 'review_signature';
+
+const DEFAULT_SIGNING_SUBJECT = 'Please review and sign: {{document_name}}';
+const DEFAULT_SIGNING_BODY = [
+  'Hello {{recipient_name}},',
+  '',
+  '{{sender_name}} has sent you the final version of "{{document_name}}" ({{document_type}}, version {{version_number}}) for signing.',
+  'The PDF is attached. You can also open it using the secure link below. No account or sign-in is needed:',
+  '{{review_link}}',
+  '',
+  'This link expires on {{date}}.',
+].join('\n');
 
 const DEFAULT_SHARE_SUBJECT = 'Please review: {{document_name}}';
 const DEFAULT_SHARE_BODY = [
@@ -71,9 +91,15 @@ type ShareLinkRow = {
 type CommentRow = {
   id: string;
   shareLinkId: string;
+  kind: string;
   pageNumber: number;
   xPct: number;
   yPct: number;
+  boxWPct: number | null;
+  boxHPct: number | null;
+  originalText: string | null;
+  replacementText: string | null;
+  resultingVersionId: string | null;
   body: string;
   status: string;
   createdAt: Date;
@@ -83,9 +109,13 @@ type CommentRow = {
 };
 
 /**
- * External document review: mints a possession-token share link for a document, lets staff review and act on the
- * client's one open comment, and stamps a pre-approved signature onto a re-versioned PDF when a comment is
- * accepted. Reuses the exact lock/version pattern documents.service.ts already uses for `restore()`.
+ * External document review, end to end:
+ *   1. staff email a possession-token share link (and the client opens it with no account);
+ *   2. the client leaves any number of comments and suggested text changes;
+ *   3. staff accept or dismiss each one -- the link closes itself once none is left open;
+ *   4. staff apply the accepted changes to the PDF (a new version), then stamp the pre-approved signature (another);
+ *   5. staff send the final PDF back to the client.
+ * Steps 4 reuse the exact lock/version pattern documents.service.ts already uses for `restore()`.
  */
 export class ReviewService {
   private readonly publicUrl: string;
@@ -124,9 +154,15 @@ export class ReviewService {
     return {
       id: c.id,
       shareLinkId: c.shareLinkId,
+      kind: c.kind as ReviewCommentKind,
       pageNumber: c.pageNumber,
       xPct: c.xPct,
       yPct: c.yPct,
+      boxWPct: c.boxWPct,
+      boxHPct: c.boxHPct,
+      originalText: c.originalText,
+      replacementText: c.replacementText,
+      applied: c.kind === 'CHANGE' && c.resultingVersionId !== null,
       body: c.body,
       status: c.status as ReviewCommentStatus,
       createdAt: c.createdAt.toISOString(),
@@ -184,8 +220,9 @@ export class ReviewService {
     // The raw token exists only here and in the one outbound email below; it is never logged or stored again.
     const linkUrl = `${this.publicUrl}/review/${token}`;
 
-    let subject = DEFAULT_SHARE_SUBJECT;
-    let body = DEFAULT_SHARE_BODY;
+    const signing = input.purpose === 'SIGNING';
+    let subject = signing ? DEFAULT_SIGNING_SUBJECT : DEFAULT_SHARE_SUBJECT;
+    let body = signing ? DEFAULT_SIGNING_BODY : DEFAULT_SHARE_BODY;
     if (input.templateId) {
       const tpl = await this.db.emailTemplate.findUnique({ where: { id: input.templateId } });
       if (!tpl || !tpl.isActive) throw new HttpError(400, 'Unknown or inactive email template', 'VALIDATION_ERROR', [{ path: 'templateId', message: 'Unknown or inactive template' }]);
@@ -201,7 +238,8 @@ export class ReviewService {
       subject,
       body,
       templateId: input.templateId,
-      attach: input.attach,
+      // The final, signed-off PDF always travels with a signing email; a plain review email attaches only on request.
+      attach: input.attach || signing,
       extra: { review_link: linkUrl },
     };
 
@@ -239,71 +277,110 @@ export class ReviewService {
     return rows.map((r) => this.toCommentDto(r));
   }
 
-  /** Accept = re-stamp only: the PDF content is unchanged, a signature image is embedded and a new version is created. */
-  async acceptComment(actor: AuthContext, commentId: string, input: { signatureAssetId?: string | undefined }, meta: RequestMeta): Promise<ReviewCommentDto> {
-    const comment = await this.db.documentReviewComment.findUnique({ where: { id: commentId }, include: { shareLink: { include: { version: true } } } });
-    if (!comment || comment.status !== 'OPEN') throw new HttpError(404, 'Comment not found');
-    const srcVersion = comment.shareLink.version;
-    if (srcVersion.scanStatus !== 'CLEAN') throw new HttpError(409, 'The reviewed version is no longer clean', 'CONFLICT');
+  /** Closes the client's link once staff have answered everything on it: ACCEPTED if anything was accepted, else
+   * DISMISSED. Both are terminal for the client (their link stops working) and are what a signing/resend builds on. */
+  private async closeLinkIfAnswered(tx: Prisma.TransactionClient, shareLinkId: string): Promise<void> {
+    const open = await tx.documentReviewComment.count({ where: { shareLinkId, status: 'OPEN' } });
+    if (open > 0) return;
+    const accepted = await tx.documentReviewComment.count({ where: { shareLinkId, status: 'ACCEPTED' } });
+    await tx.documentShareLink.update({ where: { id: shareLinkId }, data: { status: accepted > 0 ? 'ACCEPTED' : 'DISMISSED' } });
+  }
 
-    const signature = input.signatureAssetId
-      ? await this.db.signatureAsset.findFirst({ where: { id: input.signatureAssetId, isActive: true } })
-      : await this.db.signatureAsset.findFirst({ where: { isDefault: true, isActive: true } });
-    if (!signature) throw new HttpError(409, 'No signature is configured; choose one or mark one as the default signature asset', 'CONFLICT');
-
-    const pdfBytes = await this.files.readVerified(
-      'clean', srcVersion.storageKey,
-      { keyId: srcVersion.encryptionKeyId, wrappedKey: Buffer.from(srcVersion.wrappedDataKey) },
-      { sha256: srcVersion.sha256, size: Number(srcVersion.sizeBytes) },
+  private readVersionBytes(v: DocumentVersion): Promise<Buffer> {
+    return this.files.readVerified(
+      'clean', v.storageKey,
+      { keyId: v.encryptionKeyId, wrappedKey: Buffer.from(v.wrappedDataKey) },
+      { sha256: v.sha256, size: Number(v.sizeBytes) },
       this.maxBytes + 1024 * 1024
     );
-    const sigBytes = await this.files.readVerified(
-      'clean', signature.storageKey,
-      { keyId: signature.encryptionKeyId, wrappedKey: Buffer.from(signature.wrappedDataKey) },
-      { sha256: signature.sha256, size: Number(signature.sizeBytes) },
-      10 * 1024 * 1024
-    );
+  }
 
-    const pages = await pageCount(pdfBytes);
-    if (signature.pageNumber > pages) {
-      throw new HttpError(409, `The signature's page (${signature.pageNumber}) is beyond this document's ${pages} page(s)`, 'CONFLICT');
-    }
+  private versionSource(v: DocumentVersion): string | null {
+    const s = (v.scanDetails as { source?: unknown } | null)?.source;
+    return typeof s === 'string' ? s : null;
+  }
 
-    const stamped = await stamp({ pdfBytes, signature: { bytes: sigBytes, pageNumber: signature.pageNumber, xPt: signature.xPt, yPt: signature.yPt, widthPt: signature.widthPt, heightPt: signature.heightPt } });
-    const stored = await this.files.store('clean', Readable.from(stamped), { maxBytes: this.maxBytes });
+  /** A PDF a person has a review open against is only a safe base for new edits while nothing else was uploaded since. */
+  private assertDerivedFromReviewed(base: DocumentVersion, reviewedVersionId: string): void {
+    const src = this.versionSource(base);
+    if (base.id === reviewedVersionId || src === SOURCE_APPLY || src === SOURCE_SIGNATURE) return;
+    throw new HttpError(409, 'A newer version was uploaded after this review link was sent, so the client\'s marks no longer line up. Send a fresh review link for the current version.', 'CONFLICT');
+  }
 
+  private async loadCurrentVersion(documentId: string): Promise<DocumentVersion> {
+    const doc = await this.db.document.findUnique({ where: { id: documentId }, include: { currentVersion: true } });
+    if (!doc) throw new HttpError(404, 'Document not found');
+    const v = doc.currentVersion;
+    if (!v) throw new HttpError(409, 'This document has no current version', 'CONFLICT');
+    if (v.scanStatus !== 'CLEAN') throw new HttpError(409, 'The current version is not clean, so it cannot be edited', 'CONFLICT');
+    return v;
+  }
+
+  /**
+   * Writes `bytes` as the document's next version under the document row lock, then runs `after` in the same
+   * transaction. Fails with 409 if the current version moved while the PDF was being prepared, so an edit is never
+   * written on top of a version the person did not see. The stored file is removed again if the transaction fails.
+   */
+  private async commitDerivedVersion(args: {
+    actor: AuthContext;
+    documentId: string;
+    base: DocumentVersion;
+    bytes: Buffer;
+    changeNote: string;
+    scanDetails: Prisma.InputJsonObject;
+    meta: RequestMeta;
+    auditAction: string;
+    auditDetails: Record<string, unknown>;
+    after?: (tx: Prisma.TransactionClient, versionId: string) => Promise<void>;
+  }): Promise<{ versionId: string; versionNumber: number }> {
+    const { actor, documentId, base, meta } = args;
+    const stored = await this.files.store('clean', Readable.from(args.bytes), { maxBytes: this.maxBytes });
     try {
-      const updatedComment = await this.db.$transaction(async (tx) => {
-        const documentId = comment.shareLink.documentId;
+      return await this.db.$transaction(async (tx) => {
         const doc = await lockDocument(tx, documentId);
         assertEditable(doc.archiveStatus);
+        if (doc.currentVersionId !== base.id) throw new HttpError(409, 'The document changed while this was being prepared. Reload and try again.', 'CONFLICT');
         const n = await nextVersionNumber(tx, documentId);
         const v = await tx.documentVersion.create({
           data: {
-            ...versionData(documentId, n, { filename: srcVersion.originalFilename, stored }, actor.userId, 'Stamped after accepting a client review comment'),
+            ...versionData(documentId, n, { filename: base.originalFilename, stored }, actor.userId, args.changeNote),
             scanStatus: 'CLEAN',
             scannedAt: new Date(),
-            scanDetails: { source: 'review_accept', commentId, signatureAssetId: signature.id },
+            scanDetails: args.scanDetails,
           },
         });
         await tx.document.update({ where: { id: documentId }, data: { currentVersionId: v.id } });
-        const c = await tx.documentReviewComment.update({
-          where: { id: commentId },
-          data: { status: 'ACCEPTED', resolvedById: actor.userId, resolvedAt: new Date(), resultingVersionId: v.id },
-          include: { resolvedBy: { select: { id: true, name: true } } },
-        });
-        await tx.documentShareLink.update({ where: { id: comment.shareLinkId }, data: { status: 'ACCEPTED' } });
+        if (args.after) await args.after(tx, v.id);
         await recordAudit(tx, {
-          actorType: 'USER', actorUserId: actor.userId, action: 'REVIEW_COMMENT_ACCEPTED', resourceType: 'document_review_comment', resourceId: commentId,
-          ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { documentId, versionId: v.id, signatureAssetId: signature.id },
+          actorType: 'USER', actorUserId: actor.userId, action: args.auditAction, resourceType: 'document', resourceId: documentId,
+          ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { ...args.auditDetails, versionId: v.id, versionNumber: n },
         });
-        return c;
+        return { versionId: v.id, versionNumber: n };
       });
-      return this.toCommentDto(updatedComment);
     } catch (err) {
       await this.files.delete('clean', stored.storageKey).catch(() => undefined);
       throw err;
     }
+  }
+
+  /** Accept = "yes, make this change". It records the decision only; the PDF is written later, in one go, by applyChanges. */
+  async acceptComment(actor: AuthContext, commentId: string, input: { resolutionNote?: string | undefined }, meta: RequestMeta): Promise<ReviewCommentDto> {
+    const comment = await this.db.documentReviewComment.findUnique({ where: { id: commentId } });
+    if (!comment || comment.status !== 'OPEN') throw new HttpError(404, 'Comment not found');
+    const updated = await this.db.$transaction(async (tx) => {
+      const c = await tx.documentReviewComment.update({
+        where: { id: commentId },
+        data: { status: 'ACCEPTED', resolvedById: actor.userId, resolvedAt: new Date(), resolutionNote: input.resolutionNote ?? null },
+        include: { resolvedBy: { select: { id: true, name: true } } },
+      });
+      await this.closeLinkIfAnswered(tx, comment.shareLinkId);
+      await recordAudit(tx, {
+        actorType: 'USER', actorUserId: actor.userId, action: 'REVIEW_COMMENT_ACCEPTED', resourceType: 'document_review_comment', resourceId: commentId,
+        ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { shareLinkId: comment.shareLinkId, kind: comment.kind },
+      });
+      return c;
+    });
+    return this.toCommentDto(updated);
   }
 
   async dismissComment(actor: AuthContext, commentId: string, input: { resolutionNote?: string | undefined }, meta: RequestMeta): Promise<ReviewCommentDto> {
@@ -315,14 +392,105 @@ export class ReviewService {
         data: { status: 'DISMISSED', resolvedById: actor.userId, resolvedAt: new Date(), resolutionNote: input.resolutionNote ?? null },
         include: { resolvedBy: { select: { id: true, name: true } } },
       });
-      await tx.documentShareLink.update({ where: { id: comment.shareLinkId }, data: { status: 'DISMISSED' } });
+      await this.closeLinkIfAnswered(tx, comment.shareLinkId);
       await recordAudit(tx, {
         actorType: 'USER', actorUserId: actor.userId, action: 'REVIEW_COMMENT_DISMISSED', resourceType: 'document_review_comment', resourceId: commentId,
-        ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { shareLinkId: comment.shareLinkId },
+        ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { shareLinkId: comment.shareLinkId, kind: comment.kind },
       });
       return c;
     });
     return this.toCommentDto(updated);
+  }
+
+  // ------------------------------------------------------------------ internal: write the result into the PDF
+
+  /**
+   * Step 4a. Writes every ACCEPTED, not-yet-applied suggested change of one link into the PDF as a new version
+   * (each box whited out and the new text drawn in). All comments on the link must be answered first, so a round is
+   * never applied half-way.
+   */
+  async applyChanges(actor: AuthContext, documentId: string, input: ApplyReviewChangesInput, meta: RequestMeta): Promise<{ versionId: string; versionNumber: number; applied: number }> {
+    const link = await this.db.documentShareLink.findFirst({ where: { id: input.shareLinkId, documentId } });
+    if (!link) throw new HttpError(404, 'Review link not found');
+
+    const open = await this.db.documentReviewComment.count({ where: { shareLinkId: link.id, status: 'OPEN' } });
+    if (open > 0) throw new HttpError(409, `Accept or dismiss the ${open} open comment${open === 1 ? '' : 's'} on this link first`, 'CONFLICT');
+
+    const pending = await this.db.documentReviewComment.findMany({
+      where: { shareLinkId: link.id, kind: 'CHANGE', status: 'ACCEPTED', resultingVersionId: null },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (pending.length === 0) throw new HttpError(409, 'There are no accepted changes waiting to be applied', 'CONFLICT');
+
+    const base = await this.loadCurrentVersion(documentId);
+    this.assertDerivedFromReviewed(base, link.versionId);
+
+    const pdfBytes = await this.readVersionBytes(base);
+    let edited: Buffer;
+    try {
+      edited = await applyReplacements(
+        pdfBytes,
+        pending.map((c) => ({ pageNumber: c.pageNumber, xPct: c.xPct, yPct: c.yPct, wPct: c.boxWPct ?? 0, hPct: c.boxHPct ?? 0, text: c.replacementText ?? '' }))
+      );
+    } catch (err) {
+      if (err instanceof UnsupportedTextError) {
+        throw new HttpError(400, `${err.message}. Dismiss that change or ask the client for plain letters and numbers.`, 'VALIDATION_ERROR');
+      }
+      if (err instanceof RangeError) throw new HttpError(409, 'One of the changes points at a page this document does not have', 'CONFLICT');
+      throw err;
+    }
+
+    const ids = pending.map((c) => c.id);
+    const done = await this.commitDerivedVersion({
+      actor, documentId, base, bytes: edited, meta,
+      changeNote: `Applied ${ids.length} accepted client change${ids.length === 1 ? '' : 's'}`,
+      scanDetails: { source: SOURCE_APPLY, shareLinkId: link.id, commentIds: ids },
+      auditAction: 'REVIEW_CHANGES_APPLIED',
+      auditDetails: { shareLinkId: link.id, commentIds: ids },
+      after: async (tx, versionId) => {
+        await tx.documentReviewComment.updateMany({ where: { id: { in: ids } }, data: { resultingVersionId: versionId } });
+      },
+    });
+    return { ...done, applied: ids.length };
+  }
+
+  /**
+   * Step 4b. Stamps the pre-approved signature image at its configured spot on the current version, as a new
+   * version. Refused while accepted changes are still waiting to be applied (the signature must go on last), and a
+   * version that already carries it is never stamped twice.
+   */
+  async stampSignature(actor: AuthContext, documentId: string, input: { signatureAssetId?: string | undefined }, meta: RequestMeta): Promise<{ versionId: string; versionNumber: number }> {
+    const base = await this.loadCurrentVersion(documentId);
+    if (this.versionSource(base) === SOURCE_SIGNATURE) throw new HttpError(409, 'This version already carries the signature', 'CONFLICT');
+
+    const waiting = await this.db.documentReviewComment.count({ where: { kind: 'CHANGE', status: 'ACCEPTED', resultingVersionId: null, shareLink: { documentId } } });
+    if (waiting > 0) throw new HttpError(409, `Apply the ${waiting} accepted change${waiting === 1 ? '' : 's'} first: the signature goes on last`, 'CONFLICT');
+
+    const signature = input.signatureAssetId
+      ? await this.db.signatureAsset.findFirst({ where: { id: input.signatureAssetId, isActive: true } })
+      : await this.db.signatureAsset.findFirst({ where: { isDefault: true, isActive: true } });
+    if (!signature) throw new HttpError(409, 'No signature is configured; choose one or mark one as the default signature asset', 'CONFLICT');
+
+    const pdfBytes = await this.readVersionBytes(base);
+    const sigBytes = await this.files.readVerified(
+      'clean', signature.storageKey,
+      { keyId: signature.encryptionKeyId, wrappedKey: Buffer.from(signature.wrappedDataKey) },
+      { sha256: signature.sha256, size: Number(signature.sizeBytes) },
+      10 * 1024 * 1024
+    );
+    const pages = await pageCount(pdfBytes);
+    if (signature.pageNumber > pages) {
+      throw new HttpError(409, `The signature's page (${signature.pageNumber}) is beyond this document's ${pages} page(s)`, 'CONFLICT');
+    }
+    const stamped = await stamp({ pdfBytes, signature: { bytes: sigBytes, pageNumber: signature.pageNumber, xPt: signature.xPt, yPt: signature.yPt, widthPt: signature.widthPt, heightPt: signature.heightPt } });
+
+    return this.commitDerivedVersion({
+      actor, documentId, base, bytes: stamped, meta,
+      changeNote: 'Signature added',
+      scanDetails: { source: SOURCE_SIGNATURE, signatureAssetId: signature.id },
+      auditAction: 'REVIEW_SIGNATURE_STAMPED',
+      auditDetails: { signatureAssetId: signature.id },
+    });
   }
 
   // ------------------------------------------------------------------ public, unauthenticated routes
@@ -386,27 +554,42 @@ export class ReviewService {
 
   async submitComment(token: string, input: CreateReviewCommentInput, meta: RequestMeta): Promise<ReviewCommentDto> {
     const link = await this.loadActiveLinkByToken(token);
-    try {
-      const created = await this.db.$transaction(async (tx) => {
-        const c = await tx.documentReviewComment.create({
-          data: { shareLinkId: link.id, pageNumber: input.pageNumber, xPct: input.xPct, yPct: input.yPct, body: input.body, clientIp: meta.ip, userAgent: meta.userAgent },
-          include: { resolvedBy: { select: { id: true, name: true } } },
-        });
-        if (link.status !== 'COMMENTED') await tx.documentShareLink.update({ where: { id: link.id }, data: { status: 'COMMENTED' } });
-        await recordAudit(tx, {
-          actorType: 'EXTERNAL', action: 'REVIEW_COMMENT_SUBMITTED', resourceType: 'document_review_comment', resourceId: c.id,
-          ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { shareLinkId: link.id, documentId: link.documentId },
-        });
-        await enqueueJob(tx, { type: 'notify_review_comment', payload: { commentId: c.id }, dedupeKey: `notify-review-comment:${c.id}` });
-        return c;
-      });
-      return this.toCommentDto(created);
-    } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-        throw new HttpError(409, 'This review link already has an open comment awaiting a response from staff', 'CONFLICT');
-      }
-      throw err;
+    const existing = await this.db.documentReviewComment.count({ where: { shareLinkId: link.id } });
+    if (existing >= MAX_COMMENTS_PER_LINK) {
+      throw new HttpError(409, 'This review link has reached its limit of comments. Please contact the sender.', 'CONFLICT');
     }
+
+    const isChange = input.kind === 'CHANGE';
+    // A suggested change needs no separate note: the "from -> to" line IS the comment staff read in the list and the email.
+    const body = input.body || `Change ${input.originalText ? `"${input.originalText}" ` : ''}to "${input.replacementText ?? ''}"`;
+
+    const created = await this.db.$transaction(async (tx) => {
+      const c = await tx.documentReviewComment.create({
+        data: {
+          shareLinkId: link.id,
+          kind: input.kind,
+          pageNumber: input.pageNumber,
+          xPct: input.xPct,
+          yPct: input.yPct,
+          boxWPct: isChange ? (input.boxWPct ?? null) : null,
+          boxHPct: isChange ? (input.boxHPct ?? null) : null,
+          originalText: isChange ? (input.originalText || null) : null,
+          replacementText: isChange ? (input.replacementText ?? null) : null,
+          body,
+          clientIp: meta.ip,
+          userAgent: meta.userAgent,
+        },
+        include: { resolvedBy: { select: { id: true, name: true } } },
+      });
+      if (link.status !== 'COMMENTED') await tx.documentShareLink.update({ where: { id: link.id }, data: { status: 'COMMENTED' } });
+      await recordAudit(tx, {
+        actorType: 'EXTERNAL', action: 'REVIEW_COMMENT_SUBMITTED', resourceType: 'document_review_comment', resourceId: c.id,
+        ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { shareLinkId: link.id, documentId: link.documentId, kind: input.kind },
+      });
+      await enqueueJob(tx, { type: 'notify_review_comment', payload: { commentId: c.id }, dedupeKey: `notify-review-comment:${c.id}` });
+      return c;
+    });
+    return this.toCommentDto(created);
   }
 
   // ------------------------------------------------------------------ background job: notify the review team
