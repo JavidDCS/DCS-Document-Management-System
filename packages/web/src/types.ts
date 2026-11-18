@@ -5,6 +5,7 @@ export type Permission =
   | 'users:read' | 'users:manage' | 'users:roles'
   | 'doc_types:read' | 'doc_types:manage'
   | 'documents:read' | 'documents:manage' | 'documents:archive' | 'documents:legal_hold'
+  | 'documents:review' | 'signatures:manage'
   | 'versions:create' | 'versions:restore' | 'versions:download'
   | 'email:send' | 'email:send_external' | 'email:read_own' | 'email:read_all' | 'email:connect'
   | 'templates:read' | 'templates:manage'

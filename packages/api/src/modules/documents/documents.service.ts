@@ -19,6 +19,7 @@ import { enqueueJob } from '../jobs/jobs.js';
 import { IntegrityError } from '../storage/fileCrypto.js';
 import type { FileService, StoredFile } from '../storage/fileService.js';
 import { aclAllows, aclWhere, type AccessRuleRow } from './documentAccess.js';
+import { assertEditable, lockDocument, nextVersionNumber, versionData } from './documentVersioning.js';
 
 export interface RequestMeta {
   ip: string | null;
@@ -112,7 +113,7 @@ export class DocumentsService {
     };
   }
 
-  async list(actor: AuthContext, q: { search?: string | undefined; typeId?: string | undefined; tagId?: string | undefined; active?: 'true' | 'false' | undefined; archive?: ArchiveStatus | undefined; limit: number; offset: number }) {
+  async list(actor: AuthContext, q: { search?: string | undefined; typeId?: string | undefined; tagId?: string | undefined; active?: 'true' | 'false' | undefined; archive?: ArchiveStatus | undefined; sortBy?: 'createdAt' | 'updatedAt' | 'name' | undefined; sortOrder?: 'asc' | 'desc' | undefined; limit: number; offset: number }) {
     const manager = this.manages(actor);
     const filters: Prisma.DocumentWhereInput[] = [];
     if (!manager) filters.push(this.readerWhere(actor));
@@ -132,8 +133,10 @@ export class DocumentsService {
       });
     }
     const where: Prisma.DocumentWhereInput = filters.length ? { AND: filters } : {};
+    const sortField = q.sortBy ?? 'updatedAt';
+    const sortDir = q.sortOrder ?? 'desc';
     const [rows, total] = await Promise.all([
-      this.db.document.findMany({ where, include: docInclude, orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }], take: q.limit, skip: q.offset }),
+      this.db.document.findMany({ where, include: docInclude, orderBy: [{ [sortField]: sortDir }, { id: 'asc' }], take: q.limit, skip: q.offset }),
       this.db.document.count({ where }),
     ]);
     return { items: rows.map((r) => this.toListItem(r)), total };
@@ -195,23 +198,6 @@ export class DocumentsService {
     return this.cfg.STORAGE_MAX_FILE_SIZE_MB * MB;
   }
 
-  private versionData(documentId: string, n: number, file: UploadedFile, actorId: string, changeNote?: string) {
-    return {
-      documentId,
-      versionNumber: n,
-      storageKey: file.stored.storageKey,
-      originalFilename: file.filename,
-      mimeType: 'application/pdf',
-      sizeBytes: BigInt(file.stored.size),
-      storedSize: BigInt(file.stored.storedSize),
-      sha256: file.stored.sha256,
-      encryptionKeyId: file.stored.keyId,
-      wrappedDataKey: file.stored.wrappedKey,
-      changeNote: changeNote ?? null,
-      uploadedById: actorId,
-    };
-  }
-
   private async discard(file: UploadedFile | null) {
     if (file) await this.files.delete('quarantine', file.stored.storageKey).catch(() => undefined);
   }
@@ -247,7 +233,7 @@ export class DocumentsService {
             tags: { create: tagIds.map((tagId) => ({ tagId })) },
           },
         });
-        const v = await tx.documentVersion.create({ data: this.versionData(doc.id, 1, file, actor.userId, input.changeNote) });
+        const v = await tx.documentVersion.create({ data: versionData(doc.id, 1, file, actor.userId, input.changeNote) });
         await enqueueJob(tx, { type: 'scan_file', payload: { versionId: v.id }, dedupeKey: `scan:${v.id}` });
         await this.audit(tx, actor, 'DOCUMENT_CREATED', 'document', doc.id, meta, { typeId: type.id, name: doc.name });
         await this.audit(tx, actor, 'VERSION_UPLOADED', 'document_version', v.id, meta, { documentId: doc.id, versionNumber: 1, sizeBytes: file.stored.size, sha256: file.stored.sha256 });
@@ -264,12 +250,12 @@ export class DocumentsService {
     if (!file) throw new HttpError(400, 'No file was uploaded', 'VALIDATION_ERROR', [{ path: 'file', message: 'Required' }]);
     try {
       const v = await this.db.$transaction(async (tx) => {
-        const doc = await this.lockDocument(tx, documentId);
-        this.assertEditable(doc.archiveStatus);
+        const doc = await lockDocument(tx, documentId);
+        assertEditable(doc.archiveStatus);
         const type = await tx.documentType.findUniqueOrThrow({ where: { id: doc.documentTypeId }, select: { maxFileSizeMb: true } });
         if (file.stored.size > this.maxBytesFor(type.maxFileSizeMb)) throw new HttpError(413, `The file is larger than ${type.maxFileSizeMb} MB`, 'PAYLOAD_TOO_LARGE');
-        const n = await this.nextVersionNumber(tx, documentId);
-        const created = await tx.documentVersion.create({ data: this.versionData(documentId, n, file, actor.userId, changeNote), include: versionInclude });
+        const n = await nextVersionNumber(tx, documentId);
+        const created = await tx.documentVersion.create({ data: versionData(documentId, n, file, actor.userId, changeNote), include: versionInclude });
         await tx.document.update({ where: { id: documentId }, data: { updatedAt: new Date() } });
         await enqueueJob(tx, { type: 'scan_file', payload: { versionId: created.id }, dedupeKey: `scan:${created.id}` });
         await this.audit(tx, actor, 'VERSION_UPLOADED', 'document_version', created.id, meta, { documentId, versionNumber: n, sizeBytes: file.stored.size, sha256: file.stored.sha256 });
@@ -282,31 +268,11 @@ export class DocumentsService {
     }
   }
 
-  /** Locks the document row so concurrent uploads, promotions and restores are serialised. */
-  private async lockDocument(tx: Tx, id: string) {
-    const rows = await tx.$queryRaw<{ id: string; document_type_id: string; archive_status: string; is_active: boolean; current_version_id: string | null }[]>`
-      SELECT id, document_type_id, archive_status, is_active, current_version_id FROM documents WHERE id = ${id}::uuid FOR UPDATE`;
-    const r = rows[0];
-    if (!r) throw new HttpError(404, 'Document not found');
-    return { id: r.id, documentTypeId: r.document_type_id, archiveStatus: r.archive_status, isActive: r.is_active, currentVersionId: r.current_version_id };
-  }
-
-  /** version_number = max + 1 under the document lock; UNIQUE(document_id, version_number) is the safety net. */
-  private async nextVersionNumber(tx: Tx, documentId: string): Promise<number> {
-    const max = await tx.documentVersion.aggregate({ where: { documentId }, _max: { versionNumber: true } });
-    return (max._max.versionNumber ?? 0) + 1;
-  }
-
-  private assertEditable(archiveStatus: string) {
-    if (archiveStatus === 'LEGAL_HOLD') throw new HttpError(409, 'This document is under legal hold', 'CONFLICT');
-    if (archiveStatus === 'ARCHIVED') throw new HttpError(409, 'This document is archived; unarchive it first', 'CONFLICT');
-  }
-
   async update(actor: AuthContext, id: string, patch: { name?: string | undefined; description?: string | null | undefined; metadata?: Record<string, unknown> | undefined; tagIds?: string[] | undefined }, meta: RequestMeta): Promise<DocumentDetail> {
     const tagIds = patch.tagIds !== undefined ? await this.resolveTags(patch.tagIds) : undefined;
     await this.db.$transaction(async (tx) => {
-      const doc = await this.lockDocument(tx, id);
-      this.assertEditable(doc.archiveStatus);
+      const doc = await lockDocument(tx, id);
+      assertEditable(doc.archiveStatus);
       const cur = await tx.document.findUniqueOrThrow({ where: { id }, select: { metadata: true, name: true, description: true } });
       const data: Prisma.DocumentUpdateInput = {};
       const changed: string[] = [];
@@ -334,7 +300,7 @@ export class DocumentsService {
 
   async setActive(actor: AuthContext, id: string, active: boolean, meta: RequestMeta): Promise<DocumentDetail> {
     await this.db.$transaction(async (tx) => {
-      const doc = await this.lockDocument(tx, id);
+      const doc = await lockDocument(tx, id);
       if (active) {
         if (doc.archiveStatus !== 'LIVE') throw new HttpError(409, 'Only a live (not archived, not on hold) document can be activated', 'CONFLICT');
         if (!doc.currentVersionId) throw new HttpError(409, 'The document has no clean current version yet', 'CONFLICT');
@@ -349,7 +315,7 @@ export class DocumentsService {
   async setArchive(actor: AuthContext, id: string, action: 'archive' | 'unarchive' | 'hold' | 'release', meta: RequestMeta): Promise<DocumentDetail> {
     assertRecentAuth(actor, this.cfg.REAUTH_MAX_AGE_SECONDS);
     await this.db.$transaction(async (tx) => {
-      const doc = await this.lockDocument(tx, id);
+      const doc = await lockDocument(tx, id);
       const from = doc.archiveStatus;
       let to: ArchiveStatus;
       if (action === 'archive') {
@@ -379,8 +345,8 @@ export class DocumentsService {
 
   async promote(actor: AuthContext, documentId: string, versionId: string, meta: RequestMeta): Promise<DocumentDetail> {
     await this.db.$transaction(async (tx) => {
-      const doc = await this.lockDocument(tx, documentId);
-      this.assertEditable(doc.archiveStatus);
+      const doc = await lockDocument(tx, documentId);
+      assertEditable(doc.archiveStatus);
       const v = await this.loadVersion(tx, documentId, versionId);
       if (v.scanStatus !== 'CLEAN') throw new HttpError(409, 'Only a clean version can become the current version', 'CONFLICT');
       if (doc.currentVersionId === v.id) return;
@@ -399,12 +365,12 @@ export class DocumentsService {
     const stored = await this.files.store('clean', plain, { maxBytes: this.globalMaxBytes });
     try {
       await this.db.$transaction(async (tx) => {
-        const doc = await this.lockDocument(tx, documentId);
-        this.assertEditable(doc.archiveStatus);
-        const n = await this.nextVersionNumber(tx, documentId);
+        const doc = await lockDocument(tx, documentId);
+        assertEditable(doc.archiveStatus);
+        const n = await nextVersionNumber(tx, documentId);
         const v = await tx.documentVersion.create({
           data: {
-            ...this.versionData(documentId, n, { filename: src.originalFilename, stored }, actor.userId, `Restored from version ${src.versionNumber}`),
+            ...versionData(documentId, n, { filename: src.originalFilename, stored }, actor.userId, `Restored from version ${src.versionNumber}`),
             scanStatus: 'CLEAN',
             scannedAt: new Date(),
             scanDetails: { source: 'restore', restoredFromVersion: src.versionNumber },

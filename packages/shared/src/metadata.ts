@@ -373,7 +373,13 @@ export const tagNameSchema = z
 
 export const createTagSchema = z.strictObject({ name: tagNameSchema });
 export const updateTagSchema = z.strictObject({ name: tagNameSchema });
-export const listTagsQuerySchema = z.strictObject({ search: z.string().trim().min(1).max(50).optional() });
+export const listTagsQuerySchema = z.strictObject({
+  search: z.string().trim().min(1).max(50).optional(),
+  sortBy: z.enum(['name', 'createdAt']).optional(),
+  sortOrder: z.enum(['asc', 'desc']).optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  offset: z.coerce.number().int().min(0).max(100_000).default(0),
+});
 
 export interface TagDto {
   id: string;

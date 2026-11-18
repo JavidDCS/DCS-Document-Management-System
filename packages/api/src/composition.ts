@@ -26,6 +26,10 @@ import { registerUserRoutes } from './modules/users/users.routes.js';
 import { UsersService, type UsersConfig } from './modules/users/users.service.js';
 import { registerAuditRoutes } from './modules/audit/audit.routes.js';
 import { registerReportsRoutes } from './modules/reports/reports.routes.js';
+import { registerReviewRoutes } from './modules/review/review.routes.js';
+import { ReviewService, type ReviewConfig } from './modules/review/review.service.js';
+import { registerSignatureAssetRoutes } from './modules/review/signatureAssets.routes.js';
+import { SignatureAssetsService } from './modules/review/signatureAssets.service.js';
 import { createAuthenticator } from './platform/auth/guards.js';
 import type { SecureRouter } from './platform/auth/secureRouter.js';
 import { GmailProvider } from './providers/email/gmail.js';
@@ -99,6 +103,10 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
   const emailConnections = new EmailConnectionsService(db, emailProvider, secretBox);
   const email = new EmailService(db, deps.files, documents, emailConnections, emailProvider, cfg, emailKey);
 
+  const reviewConfig: ReviewConfig = { APP_PUBLIC_URL: publicUrl, STORAGE_MAX_FILE_SIZE_MB: cfg.STORAGE_MAX_FILE_SIZE_MB };
+  const review = new ReviewService(db, deps.files, documents, email, emailConnections, reviewConfig);
+  const signatureAssets = new SignatureAssetsService(db, deps.files);
+
   users.onDeactivate(async (tx, userId) => {
     await emailConnections.wipe(tx, userId, 'REVOKED');
   });
@@ -114,6 +122,7 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
   const jobs = new JobRunner(db, cfg)
     .register('scan_file', (job) => scan.handle(job))
     .register('send_email', (job) => email.handleSend(job))
+    .register('notify_review_comment', (job) => review.handleNotify(job))
     .setDeadLetterHook((job, error) => scan.onDeadLetter(job, error));
 
   const authenticate = createAuthenticator(tokens, sessions);
@@ -135,6 +144,8 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
     emailConnections,
     emailProvider,
     googleProvider,
+    review,
+    signatureAssets,
   };
 }
 
@@ -165,6 +176,8 @@ export function registerRoutes(secure: SecureRouter, ctx: AppContext, svc: Servi
   });
   registerAuditRoutes(secure, ctx, svc.db);
   registerReportsRoutes(secure, ctx, svc.db);
+  registerReviewRoutes(secure, ctx, svc.review);
+  registerSignatureAssetRoutes(secure, ctx, svc.signatureAssets, svc.files, cfg.STORAGE_MAX_FILE_SIZE_MB * 1024 * 1024);
 }
 
 export interface FileStackEnv extends StorageEnv {

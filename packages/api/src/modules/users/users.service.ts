@@ -82,14 +82,16 @@ export class UsersService {
     if (others === 0) throw new HttpError(409, 'This would leave no active SUPER_ADMIN', 'CONFLICT');
   }
 
-  async list(q: { search?: string | undefined; status?: UserStatus | undefined; role?: Role | undefined; limit: number; offset: number }) {
+  async list(q: { search?: string | undefined; status?: UserStatus | undefined; role?: Role | undefined; sortBy?: 'name' | 'email' | 'createdAt' | 'status' | undefined; sortOrder?: 'asc' | 'desc' | undefined; limit: number; offset: number }) {
     const where: Prisma.UserWhereInput = {
       ...(q.status ? { status: q.status } : {}),
       ...(q.role ? { roles: { some: { role: q.role } } } : {}),
       ...(q.search ? { OR: [{ email: { contains: likeEscape(q.search.toLowerCase()) } }, { name: { contains: likeEscape(q.search), mode: 'insensitive' } }] } : {}),
     };
+    const sortField = q.sortBy ?? 'createdAt';
+    const sortDir = q.sortOrder ?? 'desc';
     const [rows, total] = await Promise.all([
-      this.db.user.findMany({ where, include: { roles: true }, orderBy: [{ createdAt: 'desc' }, { id: 'asc' }], take: q.limit, skip: q.offset }),
+      this.db.user.findMany({ where, include: { roles: true }, orderBy: [{ [sortField]: sortDir }, { id: 'asc' }], take: q.limit, skip: q.offset }),
       this.db.user.count({ where }),
     ]);
     return { users: rows.map(toPublicUser), total };

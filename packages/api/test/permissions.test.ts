@@ -20,6 +20,8 @@ const EXPECTED: Record<Permission, [boolean, boolean, boolean, boolean]> = {
   'documents:manage': [true, true, false, false],
   'documents:archive': [true, false, false, false],
   'documents:legal_hold': [true, false, false, false],
+  'documents:review': [true, true, false, false],
+  'signatures:manage': [true, true, false, false],
   'versions:create': [true, true, false, false],
   'versions:restore': [true, true, false, false],
   'versions:download': [true, true, true, false],

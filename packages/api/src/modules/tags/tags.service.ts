@@ -31,11 +31,17 @@ export class TagsService {
     });
   }
 
-  async list(search?: string): Promise<TagDto[]> {
+  async list(q?: string | { search?: string | undefined; sortBy?: 'name' | 'createdAt' | undefined; sortOrder?: 'asc' | 'desc' | undefined; limit?: number | undefined; offset?: number | undefined }): Promise<TagDto[]> {
+    const search = typeof q === 'string' ? q : q?.search;
+    const sortBy = typeof q === 'object' && q?.sortBy ? q.sortBy : 'name';
+    const sortOrder = typeof q === 'object' && q?.sortOrder ? q.sortOrder : 'asc';
+    const limit = typeof q === 'object' && q?.limit ? q.limit : 500;
+    const offset = typeof q === 'object' && q?.offset ? q.offset : 0;
     const rows = await this.db.tag.findMany({
       where: search ? { name: { contains: likeEscape(search), mode: 'insensitive' } } : {},
-      orderBy: { name: 'asc' },
-      take: 500,
+      orderBy: [{ [sortBy]: sortOrder }, { id: 'asc' }],
+      take: limit,
+      skip: offset,
     });
     return rows.map(toDto);
   }

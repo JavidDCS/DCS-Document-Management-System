@@ -67,6 +67,9 @@ model User {
   templatesCreated EmailTemplate[]          @relation("TemplateCreator")
   templatesUpdated EmailTemplate[]          @relation("TemplateUpdater")
   identityAccounts IdentityAccount[]
+  shareLinksCreated       DocumentShareLink[]    @relation("ShareLinkCreator")
+  reviewCommentsResolved  DocumentReviewComment[] @relation("ReviewCommentResolver")
+  signatureAssetsCreated  SignatureAsset[]        @relation("SignatureAssetCreator")
 
   @@index([createdById])
   @@index([status])
@@ -255,6 +258,7 @@ model Document {
   tags           DocumentTag[]
   accessRules    DocumentAccessRule[]
   attachedTo     EmailAttachment[]
+  shareLinks     DocumentShareLink[]
 
   @@index([documentTypeId])
   @@index([ownerId])
@@ -292,6 +296,8 @@ model DocumentVersion {
   restoredAs   DocumentVersion[] @relation("VersionRestore")
   currentOf    Document[]        @relation("CurrentVersion")
   attachedTo   EmailAttachment[]
+  shareLinks   DocumentShareLink[]     @relation("ShareLinkVersion")
+  reviewResultOf DocumentReviewComment[] @relation("ReviewResultVersion")
 
   @@unique([documentId, versionNumber])
   @@index([documentId])
@@ -439,6 +445,7 @@ model EmailMessage {
   template    EmailTemplate?           @relation(fields: [templateId], references: [id], onDelete: SetNull)
   recipients  EmailRecipient[]
   attachments EmailAttachment[]
+  shareLinksInitiated DocumentShareLink[] @relation("ShareLinkInitialEmail")
 
   @@unique([senderUserId, idempotencyKey])
   @@index([senderUserId, createdAt])
@@ -484,4 +491,93 @@ model EmailAttachment {
   @@index([documentId])
   @@index([versionId])
   @@map("email_attachments")
+}
+
+/// One row per outbound external review link (first send or a resend) -- the token IS the send instance.
+/// Only the SHA-256 of the raw token is ever stored; the raw value exists only in the one outbound email.
+model DocumentShareLink {
+  id                    String    @id @default(uuid()) @db.Uuid
+  documentId            String    @map("document_id") @db.Uuid
+  versionId             String    @map("version_id") @db.Uuid // the version snapshot shown to the client
+  tokenHash             String    @unique @map("token_hash") @db.Char(64)
+  createdById           String    @map("created_by_id") @db.Uuid
+  recipientEmail        String    @map("recipient_email")
+  status                String    @default("SENT") // SENT|VIEWED|COMMENTED|ACCEPTED|DISMISSED|REVOKED|FAILED (CHECK in SQL)
+  previousLinkId        String?   @map("previous_link_id") @db.Uuid
+  initialEmailMessageId String?   @map("initial_email_message_id") @db.Uuid
+  viewedAt              DateTime? @map("viewed_at") @db.Timestamptz(3)
+  expiresAt             DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt             DateTime? @map("revoked_at") @db.Timestamptz(3)
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  document     Document           @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  version      DocumentVersion    @relation("ShareLinkVersion", fields: [versionId], references: [id], onDelete: Restrict)
+  createdBy    User               @relation("ShareLinkCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  previousLink DocumentShareLink? @relation("ShareLinkChain", fields: [previousLinkId], references: [id], onDelete: SetNull)
+  resentAs     DocumentShareLink[] @relation("ShareLinkChain")
+  initialEmailMessage EmailMessage? @relation("ShareLinkInitialEmail", fields: [initialEmailMessageId], references: [id], onDelete: SetNull)
+  comments     DocumentReviewComment[]
+
+  @@index([documentId])
+  @@index([createdById])
+  @@index([status])
+  @@index([expiresAt])
+  @@map("document_share_links")
+}
+
+/// A client's proposed change, pinned to a page position on the document version they were shown.
+/// The client has no account, so `resolvedById` is the only user-identifying field -- set only once staff act on it.
+model DocumentReviewComment {
+  id                 String    @id @default(uuid()) @db.Uuid
+  shareLinkId        String    @map("share_link_id") @db.Uuid
+  pageNumber         Int       @map("page_number")
+  xPct               Float     @map("x_pct")
+  yPct               Float     @map("y_pct")
+  body               String
+  status             String    @default("OPEN") // OPEN|ACCEPTED|DISMISSED (CHECK in SQL)
+  resolvedById       String?   @map("resolved_by_id") @db.Uuid
+  resolvedAt         DateTime? @map("resolved_at") @db.Timestamptz(3)
+  resolutionNote     String?   @map("resolution_note")
+  resultingVersionId String?   @map("resulting_version_id") @db.Uuid
+  clientIp           String?   @map("client_ip")
+  userAgent          String?   @map("user_agent")
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  shareLink       DocumentShareLink @relation(fields: [shareLinkId], references: [id], onDelete: Restrict)
+  resolvedBy      User?             @relation("ReviewCommentResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resultingVersion DocumentVersion? @relation("ReviewResultVersion", fields: [resultingVersionId], references: [id], onDelete: Restrict)
+
+  @@index([shareLinkId])
+  @@index([status])
+  @@map("document_review_comments")
+}
+
+/// A reusable, pre-approved signature image stamped onto a document when a review comment is accepted.
+/// Stored encrypted exactly like DocumentVersion content, via the same FileCrypto/FileService -- but uploaded
+/// once by an ADMIN/SUPER_ADMIN and never scanned (never client-supplied, by explicit decision).
+model SignatureAsset {
+  id              String   @id @default(uuid()) @db.Uuid
+  label           String
+  storageKey      String   @unique @map("storage_key") @db.Uuid
+  mimeType        String   @default("image/jpeg") @map("mime_type")
+  sizeBytes       BigInt   @map("size_bytes")
+  storedSize      BigInt   @map("stored_size")
+  sha256          String   @db.Char(64)
+  encryptionKeyId String   @map("encryption_key_id")
+  wrappedDataKey  Bytes    @map("wrapped_data_key")
+  pageNumber      Int      @map("page_number")
+  xPt             Float    @map("x_pt")
+  yPt             Float    @map("y_pt")
+  widthPt         Float    @map("width_pt")
+  heightPt        Float    @map("height_pt")
+  isActive        Boolean  @default(true) @map("is_active")
+  isDefault       Boolean  @default(false) @map("is_default")
+  createdById     String   @map("created_by_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  createdBy User @relation("SignatureAssetCreator", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([isActive])
+  @@map("signature_assets")
 }

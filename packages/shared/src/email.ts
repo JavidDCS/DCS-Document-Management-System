@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 /** The only placeholders a template or an email may contain. Anything else is rejected. */
-export const EMAIL_PLACEHOLDERS = ['recipient_name', 'sender_name', 'sender_email', 'document_name', 'document_type', 'version_number', 'date'] as const;
+export const EMAIL_PLACEHOLDERS = ['recipient_name', 'sender_name', 'sender_email', 'document_name', 'document_type', 'version_number', 'date', 'review_link'] as const;
 export type EmailPlaceholder = (typeof EMAIL_PLACEHOLDERS)[number];
 
 export const PLACEHOLDER_PATTERN = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g;
@@ -49,6 +49,8 @@ const draftShape = {
   subject: subjectSchema,
   body: bodySchema,
   templateId: z.uuid().optional(),
+  attach: z.boolean().default(true),
+  extra: z.strictObject({ review_link: z.url().optional() }).optional(),
 };
 
 export const draftSchema = z.strictObject(draftShape);
@@ -65,6 +67,8 @@ export const resolveUnknownSchema = z.strictObject({ outcome: z.enum(['SENT', 'F
 
 export const listMessagesQuerySchema = z.strictObject({
   scope: z.enum(['mine', 'all']).default('mine'),
+  sortBy: z.enum(['createdAt', 'sentAt', 'subject']).optional(),
+  sortOrder: z.enum(['asc', 'desc']).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
 });

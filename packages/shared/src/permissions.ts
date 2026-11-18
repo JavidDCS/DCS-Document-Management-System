@@ -12,6 +12,8 @@ export const PERMISSIONS = [
   'documents:manage', // create, edit, tag, activate/deactivate
   'documents:archive',
   'documents:legal_hold',
+  'documents:review', // list/accept/dismiss external review comments
+  'signatures:manage', // upload/activate signature assets used to stamp accepted comments
   'versions:create',
   'versions:restore',
   'versions:download', // senders additionally need an object-level check (document sendable)
@@ -38,6 +40,8 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     'doc_types:manage',
     'documents:read',
     'documents:manage',
+    'documents:review',
+    'signatures:manage',
     'versions:create',
     'versions:restore',
     'versions:download',

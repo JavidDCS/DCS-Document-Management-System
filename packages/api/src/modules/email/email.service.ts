@@ -60,6 +60,8 @@ interface Draft {
   items: Resolved[];
   hasExternal: boolean;
   hash: string;
+  /** When false, the PDF bytes are never attached (e.g. a link-only email); the documents are referenced for context only. */
+  attach: boolean;
 }
 
 export class EmailService {
@@ -188,14 +190,15 @@ export class EmailService {
       document_type: uniq(items.map((i) => i.typeName)),
       version_number: uniq(items.map((i) => String(i.versionNumber))),
       date: new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: this.cfg.APP_TIMEZONE }).format(new Date()),
+      review_link: input.extra?.review_link ?? '',
     };
     const bad = unknownPlaceholders(input.subject, input.body);
     if (bad.length) throw new HttpError(400, 'Unknown placeholder', 'VALIDATION_ERROR', [{ path: 'body', message: `Unknown placeholder: ${bad.join(', ')}` }]);
     const subject = renderText(input.subject, values, 'subject').slice(0, 200) || 'Documents';
     const body = renderText(input.body, values, 'body');
 
-    const hash = sha256(JSON.stringify({ items: items.map((i) => [i.documentId, i.versionId]).sort(), r: recipients.map((r) => [r.kind, r.address]).sort(), subject, body }));
-    return { recipients, subject, body, items, hasExternal, hash };
+    const hash = sha256(JSON.stringify({ items: items.map((i) => [i.documentId, i.versionId]).sort(), r: recipients.map((r) => [r.kind, r.address]).sort(), subject, body, attach: input.attach }));
+    return { recipients, subject, body, items, hasExternal, hash, attach: input.attach };
   }
 
   private sign(userId: string, hash: string, exp: number): string {
@@ -226,7 +229,7 @@ export class EmailService {
       from: actor.email,
       replyTo: actor.email,
       recipients: d.recipients,
-      attachments: d.items.map((i) => ({ documentId: i.documentId, documentName: i.documentName, versionId: i.versionId, versionNumber: i.versionNumber, filename: i.filename, sizeBytes: i.sizeBytes, sha256: i.sha256 })),
+      attachments: d.attach ? d.items.map((i) => ({ documentId: i.documentId, documentName: i.documentName, versionId: i.versionId, versionNumber: i.versionNumber, filename: i.filename, sizeBytes: i.sizeBytes, sha256: i.sha256 })) : [],
       hasExternal: d.hasExternal,
       confirmationToken: d.hasExternal ? this.sign(actor.userId, d.hash, exp) : null,
       expiresAt: new Date(exp).toISOString(),
@@ -258,11 +261,12 @@ export class EmailService {
             externalConfirmed: d.hasExternal,
             templateId: input.templateId ?? null,
             recipients: { create: d.recipients.map((r) => ({ kind: r.kind, address: r.address, domain: r.address.split('@')[1]!, isExternal: r.external })) },
-            attachments: { create: d.items.map((i) => ({ documentId: i.documentId, versionId: i.versionId, sha256AtSend: i.sha256, filenameSent: i.filename, sizeBytes: BigInt(i.sizeBytes) })) },
+            // Link-only emails (attach: false) must never embed the PDF bytes: no EmailMessageAttachment rows at all.
+            ...(d.attach ? { attachments: { create: d.items.map((i) => ({ documentId: i.documentId, versionId: i.versionId, sha256AtSend: i.sha256, filenameSent: i.filename, sizeBytes: BigInt(i.sizeBytes) })) } } : {}),
           },
         });
         await enqueueJob(tx, { type: 'send_email', payload: { messageId: m.id }, dedupeKey: `email:${m.id}` });
-        await this.audit(tx, actor, 'EMAIL_QUEUED', 'email_message', m.id, meta, { recipients: d.recipients.length, attachments: d.items.length, external: d.hasExternal });
+        await this.audit(tx, actor, 'EMAIL_QUEUED', 'email_message', m.id, meta, { recipients: d.recipients.length, attachments: d.attach ? d.items.length : 0, external: d.hasExternal });
         return m;
       });
       return { id: created.id, status: 'QUEUED' };
@@ -277,13 +281,29 @@ export class EmailService {
     }
   }
 
-  private async finish(id: string, status: 'SENT' | 'FAILED' | 'UNKNOWN', fields: { providerMessageId?: string; errorCode?: string }, auditAction: string, connectionId?: string) {
+  private async finish(
+    id: string,
+    status: 'SENT' | 'FAILED' | 'UNKNOWN',
+    fields: { providerMessageId?: string; errorCode?: string },
+    auditAction: string,
+    connectionId?: string,
+    providerDetail?: string
+  ) {
     await this.db.$transaction(async (tx) => {
       const r = await tx.emailMessage.updateMany({
         where: { id, status: 'SENDING' },
         data: { status, ...(status === 'SENT' ? { sentAt: new Date() } : {}), ...fields, ...(connectionId ? { connectionId } : {}) },
       });
-      if (r.count === 1) await recordAudit(tx, { actorType: 'SYSTEM', action: auditAction, resourceType: 'email_message', resourceId: id, outcome: status === 'SENT' ? 'SUCCESS' : 'FAILURE', details: { status, errorCode: fields.errorCode ?? null } });
+      if (r.count === 1) {
+        await recordAudit(tx, {
+          actorType: 'SYSTEM',
+          action: auditAction,
+          resourceType: 'email_message',
+          resourceId: id,
+          outcome: status === 'SENT' ? 'SUCCESS' : 'FAILURE',
+          details: { status, errorCode: fields.errorCode ?? null, providerDetail: providerDetail ?? null },
+        });
+      }
     });
   }
 
@@ -319,9 +339,10 @@ export class EmailService {
       await this.finish(id, 'SENT', { providerMessageId: sent.providerMessageId }, 'EMAIL_SENT', connectionId);
     } catch (err) {
       if (err instanceof EmailProviderError) {
-        if (err.kind === 'UNKNOWN_OUTCOME') return void (await this.finish(id, 'UNKNOWN', { errorCode: 'NO_CONFIRMATION' }, 'EMAIL_UNKNOWN', connectionId));
+        logger.error('Email provider rejected the send', { messageId: id, kind: err.kind, message: err.message, detail: err.detail ?? null });
+        if (err.kind === 'UNKNOWN_OUTCOME') return void (await this.finish(id, 'UNKNOWN', { errorCode: 'NO_CONFIRMATION' }, 'EMAIL_UNKNOWN', connectionId, err.detail));
         const code = err.kind === 'AUTH_REVOKED' ? 'RECONNECT_REQUIRED' : err.kind === 'RATE_LIMITED' ? 'RATE_LIMITED' : 'REJECTED_BY_PROVIDER';
-        return void (await this.finish(id, 'FAILED', { errorCode: code }, 'EMAIL_FAILED', connectionId));
+        return void (await this.finish(id, 'FAILED', { errorCode: code }, 'EMAIL_FAILED', connectionId, err.detail));
       }
       logger.error('Email send failed before reaching the provider', { messageId: id, error: err instanceof Error ? err.message : 'error' });
       await this.finish(id, 'FAILED', { errorCode: err instanceof IntegrityError ? 'INTEGRITY_FAILURE' : 'INTERNAL_ERROR' }, 'EMAIL_FAILED');
@@ -332,11 +353,13 @@ export class EmailService {
 
   private canSeeAll = (a: AuthContext) => a.permissions.includes('email:read_all');
 
-  async list(actor: AuthContext, q: { scope: 'mine' | 'all'; limit: number; offset: number }) {
+  async list(actor: AuthContext, q: { scope: 'mine' | 'all'; sortBy?: 'createdAt' | 'sentAt' | 'subject' | undefined; sortOrder?: 'asc' | 'desc' | undefined; limit: number; offset: number }) {
     if (q.scope === 'all' && !this.canSeeAll(actor)) throw new HttpError(403, 'You do not have permission to perform this action', 'FORBIDDEN');
     const where: Prisma.EmailMessageWhereInput = q.scope === 'all' ? {} : { senderUserId: actor.userId };
+    const sortField = q.sortBy ?? 'createdAt';
+    const sortDir = q.sortOrder ?? 'desc';
     const [rows, total] = await Promise.all([
-      this.db.emailMessage.findMany({ where, orderBy: [{ createdAt: 'desc' }, { id: 'asc' }], take: q.limit, skip: q.offset, include: { sender: { select: { name: true } }, _count: { select: { recipients: true, attachments: true } } } }),
+      this.db.emailMessage.findMany({ where, orderBy: [{ [sortField]: sortDir }, { id: 'asc' }], take: q.limit, skip: q.offset, include: { sender: { select: { name: true } }, _count: { select: { recipients: true, attachments: true } } } }),
       this.db.emailMessage.count({ where }),
     ]);
     const items: EmailMessageListItem[] = rows.map((m) => ({

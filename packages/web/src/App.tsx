@@ -20,6 +20,7 @@ import { DocumentNewPage } from './pages/DocumentNewPage';
 import { DocumentsPage } from './pages/DocumentsPage';
 import { GmailSettingsPage } from './pages/GmailSettingsPage';
 import { LoginPage } from './pages/LoginPage';
+import { ReviewLinkPage } from './pages/public/ReviewLinkPage';
 import { SendPage } from './pages/SendPage';
 import { SentDetailPage, SentListPage } from './pages/SentPages';
 import { AccountSettingsPage } from './pages/AccountSettingsPage';
@@ -299,6 +300,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/review/:token" element={<ReviewLinkPage />} />
       <Route element={<RequireAuth />}>
         <Route path="/change-password" element={<ChangePasswordPage />} />
         <Route element={<Layout />}>

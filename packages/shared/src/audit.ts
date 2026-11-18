@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
-export const AUDIT_ACTOR_TYPES = ['USER', 'API_CLIENT', 'SYSTEM'] as const;
+// EXTERNAL: an unauthenticated outside party acting through a possession-token link (e.g. an external document
+// review link) -- not a signed-in USER, not an API_CLIENT, and not the SYSTEM itself.
+export const AUDIT_ACTOR_TYPES = ['USER', 'API_CLIENT', 'SYSTEM', 'EXTERNAL'] as const;
 export type AuditActorType = (typeof AUDIT_ACTOR_TYPES)[number];
 
 export const AUDIT_OUTCOMES = ['SUCCESS', 'DENIED', 'FAILURE'] as const;

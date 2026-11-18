@@ -47,6 +47,8 @@ export interface RateLimitConfig {
   RATE_LIMIT_UPLOAD_MAX_PER_HOUR: number;
   RATE_LIMIT_DOWNLOAD_MAX_PER_HOUR: number;
   RATE_LIMIT_SEND_MAX_PER_HOUR: number;
+  RATE_LIMIT_PUBLIC_REVIEW_MAX_PER_HOUR: number;
+  RATE_LIMIT_PUBLIC_COMMENT_MAX_PER_HOUR: number;
 }
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -67,5 +69,8 @@ export function createRateLimiters(cfg: RateLimitConfig, principal?: LimiterOpti
     upload: createLimiter({ windowMs: HOUR_MS, limit: cfg.RATE_LIMIT_UPLOAD_MAX_PER_HOUR, principal }),
     download: createLimiter({ windowMs: HOUR_MS, limit: cfg.RATE_LIMIT_DOWNLOAD_MAX_PER_HOUR, principal }),
     send: createLimiter({ windowMs: HOUR_MS, limit: cfg.RATE_LIMIT_SEND_MAX_PER_HOUR, principal }),
+    // Public, unauthenticated review routes: keyed by IP only (there is no principal to key by).
+    publicReview: createLimiter({ windowMs: HOUR_MS, limit: cfg.RATE_LIMIT_PUBLIC_REVIEW_MAX_PER_HOUR }),
+    publicComment: createLimiter({ windowMs: HOUR_MS, limit: cfg.RATE_LIMIT_PUBLIC_COMMENT_MAX_PER_HOUR }),
   };
 }

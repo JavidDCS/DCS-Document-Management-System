@@ -15,7 +15,7 @@ export function registerTagRoutes(secure: SecureRouter, _ctx: AppContext, svc: T
     can('documents:read'),
     validate({ query: listTagsQuerySchema }),
     asyncHandler(async (req, res) => {
-      res.json({ data: await svc.list((req.query as z.infer<typeof listTagsQuerySchema>).search) });
+      res.json({ data: await svc.list((req.query as unknown as z.infer<typeof listTagsQuerySchema>).search) });
     })
   );
 

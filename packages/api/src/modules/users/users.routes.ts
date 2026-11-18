@@ -11,6 +11,8 @@ const listQuery = z.strictObject({
   search: z.string().trim().min(1).max(100).optional(),
   status: z.enum(USER_STATUSES).optional(),
   role: z.enum(ROLES).optional(),
+  sortBy: z.enum(['name', 'email', 'createdAt', 'status']).optional(),
+  sortOrder: z.enum(['asc', 'desc']).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   offset: z.coerce.number().int().min(0).max(100_000).default(0),
 });

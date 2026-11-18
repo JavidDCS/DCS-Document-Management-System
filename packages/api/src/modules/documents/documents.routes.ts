@@ -20,7 +20,7 @@ import type { FileService } from '../storage/fileService.js';
 import type { DocumentsService } from './documents.service.js';
 import { parseUpload } from './upload.js';
 
-function contentDisposition(kind: 'attachment' | 'inline', filename: string): string {
+export function contentDisposition(kind: 'attachment' | 'inline', filename: string): string {
   const ascii = filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
   return `${kind}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`;
 }

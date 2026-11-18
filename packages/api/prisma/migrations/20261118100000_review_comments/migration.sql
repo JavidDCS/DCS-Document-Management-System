@@ -1,0 +1,151 @@
+-- CreateTable
+CREATE TABLE "document_share_links" (
+    "id" UUID NOT NULL,
+    "document_id" UUID NOT NULL,
+    "version_id" UUID NOT NULL,
+    "token_hash" CHAR(64) NOT NULL,
+    "created_by_id" UUID NOT NULL,
+    "recipient_email" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'SENT',
+    "previous_link_id" UUID,
+    "initial_email_message_id" UUID,
+    "viewed_at" TIMESTAMPTZ(3),
+    "expires_at" TIMESTAMPTZ(3) NOT NULL,
+    "revoked_at" TIMESTAMPTZ(3),
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMPTZ(3) NOT NULL,
+
+    CONSTRAINT "document_share_links_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "document_review_comments" (
+    "id" UUID NOT NULL,
+    "share_link_id" UUID NOT NULL,
+    "page_number" INTEGER NOT NULL,
+    "x_pct" DOUBLE PRECISION NOT NULL,
+    "y_pct" DOUBLE PRECISION NOT NULL,
+    "body" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'OPEN',
+    "resolved_by_id" UUID,
+    "resolved_at" TIMESTAMPTZ(3),
+    "resolution_note" TEXT,
+    "resulting_version_id" UUID,
+    "client_ip" TEXT,
+    "user_agent" TEXT,
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "document_review_comments_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "signature_assets" (
+    "id" UUID NOT NULL,
+    "label" TEXT NOT NULL,
+    "storage_key" UUID NOT NULL,
+    "mime_type" TEXT NOT NULL DEFAULT 'image/jpeg',
+    "size_bytes" BIGINT NOT NULL,
+    "stored_size" BIGINT NOT NULL,
+    "sha256" CHAR(64) NOT NULL,
+    "encryption_key_id" TEXT NOT NULL,
+    "wrapped_data_key" BYTEA NOT NULL,
+    "page_number" INTEGER NOT NULL,
+    "x_pt" DOUBLE PRECISION NOT NULL,
+    "y_pt" DOUBLE PRECISION NOT NULL,
+    "width_pt" DOUBLE PRECISION NOT NULL,
+    "height_pt" DOUBLE PRECISION NOT NULL,
+    "is_active" BOOLEAN NOT NULL DEFAULT true,
+    "is_default" BOOLEAN NOT NULL DEFAULT false,
+    "created_by_id" UUID NOT NULL,
+    "created_at" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "signature_assets_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "document_share_links_token_hash_key" ON "document_share_links"("token_hash");
+CREATE INDEX "document_share_links_document_id_idx" ON "document_share_links"("document_id");
+CREATE INDEX "document_share_links_created_by_id_idx" ON "document_share_links"("created_by_id");
+CREATE INDEX "document_share_links_status_idx" ON "document_share_links"("status");
+CREATE INDEX "document_share_links_expires_at_idx" ON "document_share_links"("expires_at");
+
+-- CreateIndex
+CREATE INDEX "document_review_comments_share_link_id_idx" ON "document_review_comments"("share_link_id");
+CREATE INDEX "document_review_comments_status_idx" ON "document_review_comments"("status");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "signature_assets_storage_key_key" ON "signature_assets"("storage_key");
+CREATE INDEX "signature_assets_is_active_idx" ON "signature_assets"("is_active");
+
+-- AddForeignKey
+ALTER TABLE "document_share_links" ADD CONSTRAINT "document_share_links_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "documents"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "document_share_links" ADD CONSTRAINT "document_share_links_version_id_fkey" FOREIGN KEY ("version_id") REFERENCES "document_versions"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "document_share_links" ADD CONSTRAINT "document_share_links_created_by_id_fkey" FOREIGN KEY ("created_by_id") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "document_share_links" ADD CONSTRAINT "document_share_links_previous_link_id_fkey" FOREIGN KEY ("previous_link_id") REFERENCES "document_share_links"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "document_share_links" ADD CONSTRAINT "document_share_links_initial_email_message_id_fkey" FOREIGN KEY ("initial_email_message_id") REFERENCES "email_messages"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "document_review_comments" ADD CONSTRAINT "document_review_comments_share_link_id_fkey" FOREIGN KEY ("share_link_id") REFERENCES "document_share_links"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "document_review_comments" ADD CONSTRAINT "document_review_comments_resolved_by_id_fkey" FOREIGN KEY ("resolved_by_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "document_review_comments" ADD CONSTRAINT "document_review_comments_resulting_version_id_fkey" FOREIGN KEY ("resulting_version_id") REFERENCES "document_versions"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "signature_assets" ADD CONSTRAINT "signature_assets_created_by_id_fkey" FOREIGN KEY ("created_by_id") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- ---------------------------------------------------------------------------
+-- Hand-written additions (not generated by Prisma)
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE "document_share_links"
+  ADD CONSTRAINT "document_share_links_status_check" CHECK ("status" IN ('SENT', 'VIEWED', 'COMMENTED', 'ACCEPTED', 'DISMISSED', 'REVOKED', 'FAILED')),
+  ADD CONSTRAINT "document_share_links_token_hash_check" CHECK ("token_hash" ~ '^[0-9a-f]{64}$'),
+  ADD CONSTRAINT "document_share_links_recipient_email_check" CHECK (char_length("recipient_email") BETWEEN 3 AND 254);
+
+ALTER TABLE "document_review_comments"
+  ADD CONSTRAINT "document_review_comments_status_check" CHECK ("status" IN ('OPEN', 'ACCEPTED', 'DISMISSED')),
+  ADD CONSTRAINT "document_review_comments_page_check" CHECK ("page_number" >= 1),
+  ADD CONSTRAINT "document_review_comments_pct_check" CHECK ("x_pct" BETWEEN 0 AND 1 AND "y_pct" BETWEEN 0 AND 1),
+  ADD CONSTRAINT "document_review_comments_body_length_check" CHECK (char_length("body") BETWEEN 1 AND 2000),
+  ADD CONSTRAINT "document_review_comments_resolution_pair_check" CHECK (("status" = 'OPEN') = ("resolved_at" IS NULL));
+
+-- Only one OPEN comment may exist per share link at a time (v1 simplification: no comment threading).
+CREATE UNIQUE INDEX "document_review_comments_one_open_per_link" ON "document_review_comments"("share_link_id") WHERE "status" = 'OPEN';
+
+ALTER TABLE "signature_assets"
+  ADD CONSTRAINT "signature_assets_mime_check" CHECK ("mime_type" = 'image/jpeg'),
+  ADD CONSTRAINT "signature_assets_label_length_check" CHECK (char_length("label") BETWEEN 1 AND 120),
+  ADD CONSTRAINT "signature_assets_sha256_check" CHECK ("sha256" ~ '^[0-9a-f]{64}$'),
+  ADD CONSTRAINT "signature_assets_sizes_check" CHECK ("size_bytes" >= 0 AND "stored_size" > 0),
+  ADD CONSTRAINT "signature_assets_page_check" CHECK ("page_number" >= 1),
+  ADD CONSTRAINT "signature_assets_geometry_check" CHECK ("x_pt" >= 0 AND "y_pt" >= 0 AND "width_pt" > 0 AND "height_pt" > 0);
+
+-- Only one default signature asset may be active at a time.
+CREATE UNIQUE INDEX "signature_assets_one_default" ON "signature_assets"("is_default") WHERE "is_default" = true;
+
+-- Share links are immutable in their identity and token; only lifecycle/status fields may change after creation.
+CREATE FUNCTION document_share_links_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'document_share_links is immutable (DELETE is not allowed)' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  IF (NEW.id, NEW.document_id, NEW.version_id, NEW.token_hash, NEW.created_by_id, NEW.recipient_email,
+      NEW.previous_link_id, NEW.created_at)
+     IS DISTINCT FROM
+     (OLD.id, OLD.document_id, OLD.version_id, OLD.token_hash, OLD.created_by_id, OLD.recipient_email,
+      OLD.previous_link_id, OLD.created_at)
+  THEN
+    RAISE EXCEPTION 'document_share_links identity fields are immutable' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER "document_share_links_guard"
+  BEFORE UPDATE OR DELETE ON "document_share_links"
+  FOR EACH ROW EXECUTE FUNCTION document_share_links_guard();
+
+-- The client has no account: their actions (viewing a link, submitting a comment) need an actor type that
+-- is neither an authenticated user, an API client, nor the system itself.
+ALTER TABLE "audit_logs" DROP CONSTRAINT "audit_logs_actor_type_check";
+ALTER TABLE "audit_logs" ADD CONSTRAINT "audit_logs_actor_type_check" CHECK ("actor_type" IN ('USER', 'API_CLIENT', 'SYSTEM', 'EXTERNAL'));

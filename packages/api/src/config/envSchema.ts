@@ -226,6 +226,9 @@ export const envObject = z.object({
   RATE_LIMIT_UPLOAD_MAX_PER_HOUR: intInRange(1, 100_000, 30),
   RATE_LIMIT_DOWNLOAD_MAX_PER_HOUR: intInRange(1, 100_000, 100),
   RATE_LIMIT_SEND_MAX_PER_HOUR: intInRange(1, 100_000, 50),
+  // Public, unauthenticated external-review routes (no principal, IP-keyed): viewing is generous, commenting is tight.
+  RATE_LIMIT_PUBLIC_REVIEW_MAX_PER_HOUR: intInRange(1, 100_000, 60),
+  RATE_LIMIT_PUBLIC_COMMENT_MAX_PER_HOUR: intInRange(1, 100_000, 5),
 
   // Logging
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),

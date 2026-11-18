@@ -6,6 +6,7 @@ import { Link, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api, ApiError, errorMessage, fieldErrors } from '../api';
 import { useAuth } from '../auth/AuthContext';
+import { CommentsReviewPanel } from '../components/CommentsReviewPanel';
 import { FilePicker, ProgressBar } from '../components/FilePicker';
 import { MetadataForm } from '../components/MetadataForm';
 import { TagPicker } from '../components/TagPicker';
@@ -20,7 +21,7 @@ const scanText: Record<ScanStatus, string> = { PENDING: 'Scanning…', CLEAN: 'C
 const scanIcon = { PENDING: Clock, CLEAN: ShieldCheck, QUARANTINED: ShieldAlert, REJECTED: ShieldX } as const;
 const scanColour = { PENDING: 'bg-info/10 text-info', CLEAN: 'bg-success/10 text-success', QUARANTINED: 'bg-danger/10 text-danger', REJECTED: 'bg-danger/10 text-danger' } as const;
 
-type TabId = 'overview' | 'versions' | 'access';
+type TabId = 'overview' | 'versions' | 'access' | 'comments';
 
 export function DocumentDetailPage() {
   const { id = '' } = useParams();
@@ -60,8 +61,14 @@ export function DocumentDetailPage() {
 
   const manage = can('documents:manage');
   const canDownload = can('versions:download');
+  const canReview = can('documents:review');
   const sendable = d.isActive && d.versions.some((v) => v.scanStatus === 'CLEAN');
-  const tabs: { id: TabId; label: string }[] = [{ id: 'overview', label: 'Overview' }, { id: 'versions', label: `Versions (${d.versions.length})` }, ...(manage ? [{ id: 'access' as const, label: 'Access' }] : [])];
+  const tabs: { id: TabId; label: string }[] = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'versions', label: `Versions (${d.versions.length})` },
+    ...(manage ? [{ id: 'access' as const, label: 'Access' }] : []),
+    ...(canReview ? [{ id: 'comments' as const, label: 'Client comments' }] : []),
+  ];
 
   return (
     <>
@@ -195,6 +202,8 @@ export function DocumentDetailPage() {
       )}
 
       {tab === 'access' && manage && <AccessTab docId={d.id} />}
+
+      {tab === 'comments' && canReview && <CommentsReviewPanel doc={d} />}
 
       {preview && <PreviewModal doc={d} version={preview} onClose={() => setPreview(null)} />}
       {dialog?.kind === 'promote' && dialog.version && (

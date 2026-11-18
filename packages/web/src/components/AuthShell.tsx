@@ -11,8 +11,9 @@ const POINTS = [
 
 const LINES = ['Confidential by design.', 'Invitation-only access.', 'Scanned, encrypted, auditable.'];
 
-/** Split layout used by sign-in and forced password change: sunrise brand panel left, form right. */
-export function AuthShell({ children }: { children: ReactNode }) {
+/** Split layout used by sign-in and forced password change: sunrise brand panel left, form right.
+ * `wide` widens the right-hand card (used by the public review page, which hosts a PDF viewer rather than a form). */
+export function AuthShell({ children, wide }: { children: ReactNode; wide?: boolean }) {
   const appConfig = (typeof window !== 'undefined' && (window as any).__APP_CONFIG__) || {};
   const companyName = appConfig.companyName || (import.meta as any).env.VITE_COMPANY_NAME || (import.meta as any).env.APP_COMPANY_NAME || 'DeCircle Solar';
   const [line, setLine] = useState(0);
@@ -64,7 +65,7 @@ export function AuthShell({ children }: { children: ReactNode }) {
       </aside>
 
       <main className="relative grid place-items-center bg-background px-6 py-12">
-        <div className="w-full max-w-[420px] rounded-2xl border bg-card p-8 shadow-lift">
+        <div className={`w-full rounded-2xl border bg-card p-8 shadow-lift ${wide ? 'max-w-3xl' : 'max-w-[420px]'}`}>
           <div className="mb-7 flex items-center gap-3 lg:hidden">
             <Logo size={36} />
             <span className="font-display text-lg font-semibold tracking-tight">{companyName}</span>
