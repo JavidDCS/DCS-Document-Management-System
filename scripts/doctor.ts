@@ -418,6 +418,33 @@ export async function runDoctor() {
     pass(`Gmail Mailbox Dispatch OAuth`, `Not configured (optional feature)`);
   }
 
+  // Leads Manager Integration check (server-to-server hand-offs from leads.decirclesolar.com)
+  const integrationKey = env.INTEGRATION_API_KEY || '';
+  if (integrationKey) {
+    if (integrationKey.length < 16) {
+      fail('Leads Manager Integration Key Too Short', `INTEGRATION_API_KEY is ${integrationKey.length} characters; it must be at least 16.`, 'Generate a longer key with: openssl rand -base64 24');
+    } else {
+      pass(`Leads Manager Integration`, `Enabled (key is ${integrationKey.length} characters)`);
+    }
+  } else {
+    pass(`Leads Manager Integration`, `Not configured (every /api/v1/integrations/* route answers 503)`);
+  }
+
+  const testAllowlist = env.EMAIL_TEST_MODE_ALLOWLIST || '';
+  if (testAllowlist) {
+    const addresses = testAllowlist.split(',').map((a) => a.trim()).filter(Boolean);
+    const bad = addresses.filter((a) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a));
+    if (bad.length > 0) {
+      fail('EMAIL_TEST_MODE_ALLOWLIST Malformed', `Not a valid email address: ${bad.join(', ')}`, 'Use a comma-separated list of plain email addresses.');
+    } else if (isProduction) {
+      fail('EMAIL_TEST_MODE_ALLOWLIST Set in Production', 'This restricts every outbound email on a live server to the listed addresses; it is meant for testing only.', 'Remove EMAIL_TEST_MODE_ALLOWLIST in production.');
+    } else {
+      pass(`EMAIL_TEST_MODE_ALLOWLIST`, `Outbound mail restricted to ${addresses.length} address(es)`);
+    }
+  } else {
+    pass(`EMAIL_TEST_MODE_ALLOWLIST`, `Not set (no outbound restriction)`);
+  }
+
   // Production-Specific Compliance Rules
   if (isProduction) {
     // APP_PUBLIC_URL must be HTTPS

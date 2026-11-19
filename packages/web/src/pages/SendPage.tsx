@@ -6,7 +6,7 @@ import { ArrowLeft, ArrowRight, FileText, Mail, Plus, Search, Send as SendIcon, 
 import { Badge, ChipInput, Empty, ErrorBanner, InfoBanner, Modal, PageHeader, Spinner, Stepper } from '../components/ui';
 import { useDebounced, useLoad, useTitle } from '../hooks';
 import { fmtSize, newId } from '../lib/format';
-import type { DocumentDetail, DocumentListItem, DraftPreview, EmailTemplate, GmailConnection } from '../types';
+import type { DocumentDetail, DocumentListItem, DraftPreview, EmailTemplate, GmailConnection, HandoffLookup } from '../types';
 
 interface Item {
   documentId: string;
@@ -41,10 +41,18 @@ export function SendPage() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const q = useDebounced(search);
+  const handoffId = params.get('handoff');
+  const [handoffTypeId, setHandoffTypeId] = useState<string | null>(null);
 
   const conn = useLoad(async () => (await api.get<GmailConnection>('/email/connection')).data, []);
   const templates = useLoad(async () => (can('templates:read') ? (await api.get<EmailTemplate[]>('/email-templates')).data.filter((t) => t.isActive) : []), []);
-  const found = useLoad(async () => (q.trim() ? (await api.get<DocumentListItem[]>('/documents', { search: q, active: 'true', archive: 'LIVE', limit: 8 })).data : []), [q]);
+  const found = useLoad(
+    async () =>
+      q.trim()
+        ? (await api.get<DocumentListItem[]>('/documents', { search: q, active: 'true', archive: 'LIVE', limit: 8, ...(handoffTypeId ? { typeId: handoffTypeId } : {}) })).data
+        : [],
+    [q, handoffTypeId]
+  );
 
   // One idempotency key per send intent: it only changes when the content being sent changes.
   const keyRef = useRef({ key: newId(), fingerprint: '' });
@@ -72,6 +80,20 @@ export function SendPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preselect]);
 
+  // Opened from the Leads Manager app with ?handoff=<id>: prefill To, preselect its document (if any) or else
+  // filter the search to its document type, and show a banner. The person still reviews and confirms as today.
+  const handoff = useLoad(async () => (handoffId ? (await api.get<HandoffLookup>(`/email/handoffs/${handoffId}`)).data : null), [handoffId]);
+  const appliedHandoff = useRef(false);
+  useEffect(() => {
+    if (appliedHandoff.current || !handoff.data) return;
+    appliedHandoff.current = true;
+    const h = handoff.data;
+    setTo((cur) => (cur.includes(h.to) ? cur : [...cur, h.to]));
+    if (h.documentId) void addDocument(h.documentId);
+    else if (h.documentTypeId) setHandoffTypeId(h.documentTypeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handoff.data]);
+
   // Default template fills subject/body once.
   const appliedDefault = useRef(false);
   useEffect(() => {
@@ -98,6 +120,9 @@ export function SendPage() {
     () => ({ items: items.map((i) => ({ documentId: i.documentId, versionId: i.versionId })), to, cc, bcc, subject: subject.trim(), body, ...(templateId ? { templateId } : {}) }),
     [items, to, cc, bcc, subject, body, templateId]
   );
+  // Sent separately from `request` (which also drives the preview fingerprint/idempotency key): the server
+  // re-validates the hand-off itself, so it does not need to be part of what defines "the same content".
+  const handoffIdToSend = handoff.data ? handoffId : null;
   const problems: string[] = [];
   if (items.length === 0) problems.push('Add at least one document.');
   if (to.length === 0) problems.push('Add at least one recipient in To.');
@@ -127,7 +152,7 @@ export function SendPage() {
     setBusy(true);
     setError(null);
     try {
-      const r = await api.post<{ id: string; status: string }>('/email/messages', { ...request, idempotencyKey: keyRef.current.key, ...(preview.confirmationToken ? { confirmationToken: preview.confirmationToken } : {}) });
+      const r = await api.post<{ id: string; status: string }>('/email/messages', { ...request, idempotencyKey: keyRef.current.key, ...(preview.confirmationToken ? { confirmationToken: preview.confirmationToken } : {}), ...(handoffIdToSend ? { handoffId: handoffIdToSend } : {}) });
       nav(`/sent/${r.data.id}`);
     } catch (e) {
       setConfirmOpen(false);
@@ -146,6 +171,8 @@ export function SendPage() {
       <Stepper steps={['Compose', 'Review and send']} current={step === 'edit' ? 0 : 1} />
 
       <div className="stack mb-4 empty:hidden">
+        {handoff.data && <InfoBanner>Opened from the Leads app for {handoff.data.to}.</InfoBanner>}
+        {Boolean(handoffId && handoff.error) && <ErrorBanner message={errorMessage(handoff.error)} />}
         {conn.data && !connected && conn.data.available && (
           <InfoBanner kind="warn">Your Gmail account is not connected, so the email cannot be sent from your address. <Link to="/settings/gmail">Connect Gmail</Link></InfoBanner>
         )}

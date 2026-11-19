@@ -20,6 +20,7 @@ import { EmailProviderError, type EmailProvider } from '../../providers/email/ty
 import { recordAudit } from '../audit/index.js';
 import type { DocumentsService } from '../documents/documents.service.js';
 import { enqueueJob, type JobContext } from '../jobs/jobs.js';
+import { claimHandoff, findHandoff, HANDOFF_EXPIRED_MESSAGE, isHandoffUsable } from '../integrations/handoffs.js';
 import { IntegrityError } from '../storage/fileCrypto.js';
 import type { FileService } from '../storage/fileService.js';
 import type { EmailConnectionsService } from './connections.service.js';
@@ -29,6 +30,8 @@ export interface EmailConfig {
   ALLOWED_EMAIL_DOMAIN: string;
   EMAIL_MAX_ATTACHMENT_TOTAL_MB: number;
   APP_TIMEZONE: string;
+  /** Testing only: when set, every send (hand-off or not) may only go to one of these addresses. */
+  EMAIL_TEST_MODE_ALLOWLIST?: string[] | undefined;
 }
 
 export interface RequestMeta {
@@ -244,11 +247,39 @@ export class EmailService {
     if (d.hasExternal && !this.verifyToken(input.confirmationToken, actor.userId, d.hash)) {
       throw new HttpError(409, 'External recipients must be confirmed on the preview screen first', 'CONFLICT');
     }
+    // Testing only: when configured this constrains every send, not only one that carries a handoffId -- see
+    // EmailConfig.EMAIL_TEST_MODE_ALLOWLIST. Checked before anything is written, same wording as the hand-off route.
+    const allowlist = this.cfg.EMAIL_TEST_MODE_ALLOWLIST;
+    if (allowlist) {
+      const blocked = d.recipients.some((r) => !allowlist.includes(r.address));
+      if (blocked) throw new HttpError(403, `Test mode is on: mail can only go to ${allowlist.join(', ')}`, 'FORBIDDEN');
+    }
     const status = await this.connections.status(actor.userId, actor.email);
     if (status.status !== 'ACTIVE') throw new HttpError(409, 'Connect your Gmail account before sending', 'CONFLICT');
 
+    // A genuine retry (same idempotency key, same content) must succeed even if a hand-off was already consumed
+    // by the first, successful attempt -- so this short-circuits BEFORE the hand-off is ever looked at.
+    const already = await this.db.emailMessage.findUnique({ where: { senderUserId_idempotencyKey: { senderUserId: actor.userId, idempotencyKey: input.idempotencyKey } } });
+    if (already) {
+      if (already.requestHash === d.hash) return { id: already.id, status: already.status as EmailStatus };
+      throw new HttpError(409, 'This idempotency key was already used for a different email', 'CONFLICT');
+    }
+
     try {
       const created = await this.db.$transaction(async (tx) => {
+        // The server resolves externalRef itself from a validated handoffId; a client-supplied `externalRef` in
+        // the body (see sendSchema) is never read here and so can never reach the column.
+        let externalRef: string | null = null;
+        if (input.handoffId) {
+          const h = await findHandoff(tx, input.handoffId);
+          if (!h) throw new HttpError(404, 'This hand-off link was not found.', 'NOT_FOUND');
+          if (!isHandoffUsable(h)) throw new HttpError(410, HANDOFF_EXPIRED_MESSAGE, 'NOT_FOUND');
+          if (!d.recipients.some((r) => r.address === h.toAddress)) {
+            throw new HttpError(400, `The recipient list must still include ${h.toAddress}`, 'VALIDATION_ERROR', [{ path: 'to', message: 'Missing the hand-off recipient' }]);
+          }
+          externalRef = h.ref;
+        }
+
         const m = await tx.emailMessage.create({
           data: {
             senderUserId: actor.userId,
@@ -260,13 +291,24 @@ export class EmailService {
             replyToAddress: actor.email,
             externalConfirmed: d.hasExternal,
             templateId: input.templateId ?? null,
+            externalRef,
             recipients: { create: d.recipients.map((r) => ({ kind: r.kind, address: r.address, domain: r.address.split('@')[1]!, isExternal: r.external })) },
             // Link-only emails (attach: false) must never embed the PDF bytes: no EmailMessageAttachment rows at all.
             ...(d.attach ? { attachments: { create: d.items.map((i) => ({ documentId: i.documentId, versionId: i.versionId, sha256AtSend: i.sha256, filenameSent: i.filename, sizeBytes: BigInt(i.sizeBytes) })) } } : {}),
           },
         });
+
+        // Marked used only now, in the same transaction as the message: a crash or rollback before this point
+        // (including the idempotency conflict handled below) leaves the hand-off untouched, so a retry can still
+        // use it. The WHERE clause (not just the isHandoffUsable check above) is what actually prevents a race
+        // between two concurrent requests for the same hand-off.
+        if (input.handoffId) {
+          const claimed = await claimHandoff(tx, input.handoffId, actor.userId);
+          if (!claimed) throw new HttpError(409, 'This hand-off link was just used by another request.', 'CONFLICT');
+        }
+
         await enqueueJob(tx, { type: 'send_email', payload: { messageId: m.id }, dedupeKey: `email:${m.id}` });
-        await this.audit(tx, actor, 'EMAIL_QUEUED', 'email_message', m.id, meta, { recipients: d.recipients.length, attachments: d.attach ? d.items.length : 0, external: d.hasExternal });
+        await this.audit(tx, actor, 'EMAIL_QUEUED', 'email_message', m.id, meta, { recipients: d.recipients.length, attachments: d.attach ? d.items.length : 0, external: d.hasExternal, handoffId: input.handoffId ?? null });
         return m;
       });
       return { id: created.id, status: 'QUEUED' };

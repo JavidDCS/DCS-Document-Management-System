@@ -48,6 +48,12 @@ export function createCsrf(opts: CsrfOptions) {
   const verify: RequestHandler = (req: Request, _res: Response, next: NextFunction) => {
     if (SAFE_METHODS.has(req.method)) return next();
 
+    // The /integrations/* routes are server-to-server only (the Leads Manager integration): there is never a
+    // cookie session to forge in the first place, so CSRF does not apply there at all -- same reasoning as the
+    // Bearer-token case below, just decided by path instead of by header, since a missing/wrong key must still
+    // reach requireIntegrationKey to get its own 401/503 rather than being turned away here as CSRF_FAILED.
+    if (req.path.startsWith('/integrations/')) return next();
+
     const origin = req.header('origin');
     if (origin !== undefined && !allowed.has(origin)) {
       return next(new HttpError(403, 'Origin not allowed', 'ORIGIN_NOT_ALLOWED'));

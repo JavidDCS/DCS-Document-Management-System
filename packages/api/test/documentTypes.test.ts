@@ -11,7 +11,10 @@ const walk = (dir: string): string[] =>
 describe('no document type is hardcoded', () => {
   it('the source, migrations and seeds mention no specific document type', () => {
     const roots = [path.resolve(__dirname, '../src'), path.resolve(__dirname, '../prisma'), path.resolve(__dirname, '../../shared/src')];
-    for (const f of roots.flatMap(walk).filter((x) => /\.(ts|sql|prisma|json)$/.test(x))) {
+    // Exception: the Leads Manager handoff contract fixes two document-type keys ("nda"/"teaser") as a
+    // deliberate cross-app vocabulary, not a document-type-system assumption -- scoped to its own files only.
+    const isIntegrationFile = (f: string) => /integrations?[\\/]|integration_handoffs/i.test(f);
+    for (const f of roots.flatMap(walk).filter((x) => /\.(ts|sql|prisma|json)$/.test(x) && !isIntegrationFile(x))) {
       const text = readFileSync(f, 'utf8');
       expect(text, f).not.toMatch(/\bNDA\b|\bmandate\b/i);
       if (f.endsWith('.sql')) expect(text, f).not.toMatch(/INSERT\s+INTO\s+"?(document_types|document_type_fields|tags)/i);

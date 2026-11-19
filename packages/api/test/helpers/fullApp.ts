@@ -44,6 +44,7 @@ export const testConfig: ServicesConfig = {
   EMAIL_TOKEN_ENCRYPTION_KEY: testEmailKey,
   EMAIL_MAX_ATTACHMENT_TOTAL_MB: 20,
   APP_TIMEZONE: 'Asia/Kolkata',
+  INTEGRATION_HANDOFF_MINUTES: 60,
 };
 
 export interface TestDeps {

@@ -49,6 +49,7 @@ export interface RateLimitConfig {
   RATE_LIMIT_SEND_MAX_PER_HOUR: number;
   RATE_LIMIT_PUBLIC_REVIEW_MAX_PER_HOUR: number;
   RATE_LIMIT_PUBLIC_COMMENT_MAX_PER_HOUR: number;
+  RATE_LIMIT_INTEGRATION_MAX_PER_HOUR: number;
 }
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -72,5 +73,7 @@ export function createRateLimiters(cfg: RateLimitConfig, principal?: LimiterOpti
     // Public, unauthenticated review routes: keyed by IP only (there is no principal to key by).
     publicReview: createLimiter({ windowMs: HOUR_MS, limit: cfg.RATE_LIMIT_PUBLIC_REVIEW_MAX_PER_HOUR }),
     publicComment: createLimiter({ windowMs: HOUR_MS, limit: cfg.RATE_LIMIT_PUBLIC_COMMENT_MAX_PER_HOUR }),
+    // Server-to-server integration routes: no session to key on, so IP-keyed like the other public routes above.
+    integration: createLimiter({ windowMs: HOUR_MS, limit: cfg.RATE_LIMIT_INTEGRATION_MAX_PER_HOUR }),
   };
 }

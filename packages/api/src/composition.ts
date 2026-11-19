@@ -15,6 +15,8 @@ import { registerEmailRoutes } from './modules/email/email.routes.js';
 import { EmailService } from './modules/email/email.service.js';
 import { EmailConnectionsService } from './modules/email/connections.service.js';
 import { SecretBox } from './modules/email/secretBox.js';
+import { registerIntegrationRoutes } from './modules/integrations/integrations.routes.js';
+import { IntegrationsService } from './modules/integrations/integrations.service.js';
 import { ClamAvScanner, DisabledScanner, type MalwareScanner } from './modules/file-security/scanner.js';
 import { ScanService, type ScanConfig } from './modules/file-security/scan.service.js';
 import { JobRunner, type JobsConfig } from './modules/jobs/jobs.js';
@@ -66,6 +68,9 @@ export type ServicesConfig = AppConfig &
     GOOGLE_CLIENT_SECRET?: string | undefined;
     GOOGLE_REDIRECT_URI?: string | undefined;
     ALLOWED_GOOGLE_DOMAINS?: string | undefined;
+    INTEGRATION_API_KEY?: string | undefined;
+    INTEGRATION_HANDOFF_MINUTES: number;
+    EMAIL_TEST_MODE_ALLOWLIST?: string[] | undefined;
   };
 
 export interface ServiceDeps {
@@ -102,6 +107,8 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
     });
   const emailConnections = new EmailConnectionsService(db, emailProvider, secretBox);
   const email = new EmailService(db, deps.files, documents, emailConnections, emailProvider, cfg, emailKey);
+
+  const integrations = new IntegrationsService(db, { handoffMinutes: cfg.INTEGRATION_HANDOFF_MINUTES, allowlist: cfg.EMAIL_TEST_MODE_ALLOWLIST });
 
   const reviewConfig: ReviewConfig = { APP_PUBLIC_URL: publicUrl, STORAGE_MAX_FILE_SIZE_MB: cfg.STORAGE_MAX_FILE_SIZE_MB };
   const review = new ReviewService(db, deps.files, documents, email, emailConnections, reviewConfig);
@@ -146,6 +153,7 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
     googleProvider,
     review,
     signatureAssets,
+    integrations,
   };
 }
 
@@ -173,6 +181,11 @@ export function registerRoutes(secure: SecureRouter, ctx: AppContext, svc: Servi
     email: svc.email,
     connections: svc.emailConnections,
     publicUrl: cfg.APP_PUBLIC_URL ?? cfg.CORS_ORIGINS[0]!,
+  });
+  registerIntegrationRoutes(secure, ctx, {
+    integrations: svc.integrations,
+    apiKey: cfg.INTEGRATION_API_KEY,
+    db: svc.db,
   });
   registerAuditRoutes(secure, ctx, svc.db);
   registerReportsRoutes(secure, ctx, svc.db);
