@@ -177,6 +177,15 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
   const decide = (id: string, action: 'accept' | 'dismiss') =>
     run(id, () => api.post(`/review-comments/${id}/${action}`), action === 'accept' ? 'Accepted' : 'Dismissed', false);
 
+  // Staff's own wording for a suggested change, keyed by comment id -- only sent on Accept, and only if it
+  // actually differs from what the client proposed. The client's own submission is never touched.
+  const [edits, setEdits] = useState<Record<string, string>>({});
+  const acceptChange = (c: ReviewCommentDto) => {
+    const edited = edits[c.id]?.trim();
+    const body = edited && edited !== c.replacementText ? { editedReplacementText: edited } : {};
+    return run(c.id, () => api.post(`/review-comments/${c.id}/accept`, body), 'Accepted', false);
+  };
+
   // "What now?" -- the one line a person needs, in the order the work actually happens.
   let next: string;
   if (links.length === 0) next = 'Step 1: email the document to the client for review.';
@@ -264,14 +273,29 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
                   <p className="mb-0 mt-1">
                     {c.originalText ? <span className="line-through">{c.originalText}</span> : <span className="muted">(text inside the box)</span>}
                     {' → '}
-                    <strong>{c.replacementText}</strong>
+                    <strong>{c.editedReplacementText ?? c.replacementText}</strong>
+                    {c.editedReplacementText && c.editedReplacementText !== c.replacementText && (
+                      <span className="muted text-xs"> (client wrote "{c.replacementText}")</span>
+                    )}
                   </p>
                 ) : null}
                 {c.kind === 'COMMENT' || !c.body.startsWith('Change ') ? <p className="mb-0 mt-1 whitespace-pre-wrap">{c.body}</p> : null}
+                {c.kind === 'CHANGE' && c.status === 'OPEN' && (
+                  <label className="field mt-2" onClick={(e) => e.stopPropagation()}>
+                    <span className="text-xs font-medium">Edit before accepting (optional)</span>
+                    <input
+                      type="text"
+                      value={edits[c.id] ?? c.replacementText ?? ''}
+                      onChange={(e) => setEdits((cur) => ({ ...cur, [c.id]: e.target.value }))}
+                      disabled={busy !== null}
+                      maxLength={300}
+                    />
+                  </label>
+                )}
                 {c.status === 'OPEN' && (
                   <div className="row mt-2">
                     <button type="button" className="btn small" disabled={busy !== null} onClick={(e) => { e.stopPropagation(); decide(c.id, 'dismiss'); }}>Dismiss</button>
-                    <button type="button" className="btn small primary" disabled={busy !== null} onClick={(e) => { e.stopPropagation(); decide(c.id, 'accept'); }}>Accept</button>
+                    <button type="button" className="btn small primary" disabled={busy !== null} onClick={(e) => { e.stopPropagation(); c.kind === 'CHANGE' ? acceptChange(c) : decide(c.id, 'accept'); }}>Accept</button>
                   </div>
                 )}
                 {c.resolvedBy && (

@@ -1,5 +1,6 @@
 import { readdirSync } from 'node:fs';
 import path from 'node:path';
+import { inflateSync } from 'node:zlib';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { EmailProvider } from '../src/providers/email/types.js';
@@ -37,6 +38,27 @@ class MockEmailProvider implements EmailProvider {
 const TINY_JPEG_BASE64 =
   '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDABALDA4MChAODQ4SERATGCgaGBYWGDEjJR0oOjM9PDkzODdASFxOQERXRTc4UG1RV19iZ2hnPk1xeXBkeFxlZ2P/2wBDARESEhgVGC8aGi9jQjhCY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2P/wAARCAAEAAQDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDHooorhPqD/9k=';
 const tinyJpeg = () => Buffer.from(TINY_JPEG_BASE64, 'base64');
+
+/** pdf-lib's content streams are Flate-compressed, so a plain byte search never finds drawn text. Pull every
+ * `stream...endstream` block out of the raw PDF, inflate the ones that are real zlib data (skip the rest, e.g.
+ * the JPEG XObject), and check the decompressed text -- a real, if blunt, proof the string actually got drawn. */
+function pdfContainsText(pdfBytes: Buffer, needle: string): boolean {
+  // pdf-lib's drawText writes a PDF hex string (`<...Tj>`), not a parenthesized literal -- check both forms.
+  const needleHex = Buffer.from(needle, 'latin1').toString('hex').toUpperCase();
+  const matches = (s: string) => s.includes(needle) || s.toUpperCase().includes(needleHex);
+  const raw = pdfBytes.toString('latin1');
+  const re = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw))) {
+    if (matches(m[1]!)) return true; // an uncompressed stream -- check it as-is
+    try {
+      if (matches(inflateSync(Buffer.from(m[1]!, 'latin1')).toString('latin1'))) return true;
+    } catch {
+      // not a zlib stream (e.g. the embedded JPEG) -- already checked raw above, nothing more to do
+    }
+  }
+  return false;
+}
 
 describe.skipIf(skipDb)('external document review: share links, comments, accept/dismiss, signatures (database)', () => {
   const prisma = skipDb ? (undefined as never) : testPrisma();
@@ -452,6 +474,47 @@ describe.skipIf(skipDb)('external document review: share links, comments, accept
       expect(comments.find((c: any) => c.id === r.commentId)).toMatchObject({ applied: true });
     });
 
+    it('staff may edit the wording at accept time -- the edited text is what gets written into the PDF, never the client\'s own submission', async () => {
+      const r = await startRound('Acme Solor'); // a client typo, on purpose
+      const accepted = await admin.post(`/review-comments/${r.commentId}/accept`, { editedReplacementText: 'Acme Solar Pvt Ltd' });
+      expect(accepted.status, JSON.stringify(accepted.body)).toBe(200);
+      expect(accepted.body.data).toMatchObject({ replacementText: 'Acme Solor', editedReplacementText: 'Acme Solar Pvt Ltd' });
+
+      // The client's own row is untouched -- only the override field changed.
+      const row = await prisma.documentReviewComment.findUniqueOrThrow({ where: { id: r.commentId } });
+      expect(row.replacementText).toBe('Acme Solor');
+      expect(row.editedReplacementText).toBe('Acme Solar Pvt Ltd');
+
+      const res = await admin.post(`/documents/${r.documentId}/review/incorporate-changes`, { shareLinkId: r.shareLinkId });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+      // The staff-edited wording is what actually reaches the PDF bytes, not the client's typo.
+      const v2 = await admin.get(`/documents/${r.documentId}`);
+      const content = await admin
+        .get(`/documents/${r.documentId}/versions/${v2.body.data.versions[0].id}/content`)
+        .buffer(true)
+        .parse((res, cb) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (x: Buffer) => chunks.push(x));
+          res.on('end', () => cb(null, Buffer.concat(chunks)));
+        });
+      expect(content.status).toBe(200);
+      const bytes = content.body as Buffer;
+      expect(pdfContainsText(bytes, 'Acme Solar Pvt Ltd')).toBe(true);
+      expect(pdfContainsText(bytes, 'Acme Solor')).toBe(false);
+    });
+
+    it('refuses to edit the wording of a plain COMMENT (it has no replacement to edit)', async () => {
+      const documentId = await createActiveDocument(uniq('Comment-only doc'));
+      const link = await createLink(documentId);
+      const token = await extractToken(link.body.data.id);
+      const c = await publicPost(`/public/review/${token}/comments`, { pageNumber: 1, xPct: 0.2, yPct: 0.2, body: 'Just a note' });
+      expect(c.status, JSON.stringify(c.body)).toBe(201);
+
+      const res = await admin.post(`/review-comments/${c.body.data.id}/accept`, { editedReplacementText: 'Not applicable' });
+      expect(res.status).toBe(400);
+    });
+
     it('refuses with a plain reason when nothing is accepted yet, and writes no version', async () => {
       const r = await startRound('Acme Solar'); // left OPEN, never accepted
       const res = await admin.post(`/documents/${r.documentId}/review/incorporate-changes`, { shareLinkId: r.shareLinkId });
@@ -506,6 +569,51 @@ describe.skipIf(skipDb)('external document review: share links, comments, accept
     it('is off-limits to a role without documents:review', async () => {
       const r = await startRound('Acme Solar');
       expect((await sender.post(`/documents/${r.documentId}/review/incorporate-changes`, { shareLinkId: r.shareLinkId })).status).toBe(403);
+    });
+  });
+
+  describe('edit-text: staff editing the document directly, anywhere, no client or share link involved', () => {
+    it('writes every box as one new version, with the exact text staff typed', async () => {
+      const documentId = await createActiveDocument(uniq('Manual edit doc'));
+      const res = await admin.post(`/documents/${documentId}/review/edit-text`, {
+        edits: [
+          { pageNumber: 1, xPct: 0.1, yPct: 0.1, wPct: 0.3, hPct: 0.05, text: 'First Edit' },
+          { pageNumber: 1, xPct: 0.1, yPct: 0.3, wPct: 0.3, hPct: 0.05, text: 'Second Edit' },
+        ],
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.data).toMatchObject({ versionNumber: 2, edited: 2 });
+
+      const doc = (await admin.get(`/documents/${documentId}`)).body.data;
+      expect(doc.versions).toHaveLength(2); // the original upload, plus exactly one new version for both edits together
+      const v2 = await prisma.documentVersion.findUniqueOrThrow({ where: { id: doc.versions[0].id } });
+      expect(v2.scanDetails).toMatchObject({ source: 'review_manual_edit', count: 2 });
+
+      const content = await admin
+        .get(`/documents/${documentId}/versions/${doc.versions[0].id}/content`)
+        .buffer(true)
+        .parse((r, cb) => {
+          const chunks: Buffer[] = [];
+          r.on('data', (x: Buffer) => chunks.push(x));
+          r.on('end', () => cb(null, Buffer.concat(chunks)));
+        });
+      expect(pdfContainsText(content.body as Buffer, 'First Edit')).toBe(true);
+      expect(pdfContainsText(content.body as Buffer, 'Second Edit')).toBe(true);
+    });
+
+    it('refuses a box that runs off the page, and refuses a page number the document does not have', async () => {
+      const documentId = await createActiveDocument(uniq('Manual edit doc'));
+      const offPage = await admin.post(`/documents/${documentId}/review/edit-text`, { edits: [{ pageNumber: 1, xPct: 0.9, yPct: 0.1, wPct: 0.3, hPct: 0.05, text: 'x' }] });
+      expect(offPage.status).toBe(400);
+
+      const badPage = await admin.post(`/documents/${documentId}/review/edit-text`, { edits: [{ pageNumber: 99, xPct: 0.1, yPct: 0.1, wPct: 0.3, hPct: 0.05, text: 'x' }] });
+      expect(badPage.status).toBe(409);
+      expect((await admin.get(`/documents/${documentId}`)).body.data.versions).toHaveLength(1); // nothing written
+    });
+
+    it('is off-limits to a role without documents:manage', async () => {
+      const documentId = await createActiveDocument(uniq('Manual edit doc'));
+      expect((await sender.post(`/documents/${documentId}/review/edit-text`, { edits: [{ pageNumber: 1, xPct: 0.1, yPct: 0.1, wPct: 0.3, hPct: 0.05, text: 'x' }] })).status).toBe(403);
     });
   });
 

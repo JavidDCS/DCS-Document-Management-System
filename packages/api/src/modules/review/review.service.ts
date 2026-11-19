@@ -8,6 +8,7 @@ import {
   type CreateReviewCommentInput,
   type CreateShareLinkInput,
   type DraftInput,
+  type EditDocumentTextInput,
   type PublicReviewLinkInfo,
   type ReviewCommentDto,
   type ReviewCommentKind,
@@ -60,6 +61,8 @@ const MAX_COMMENTS_PER_LINK = 100;
 const SOURCE_APPLY = REVIEW_SOURCE_APPLY;
 const SOURCE_SIGNATURE = REVIEW_SOURCE_SIGNATURE;
 const SOURCE_INCORPORATE = REVIEW_SOURCE_INCORPORATE;
+/** Staff editing the document directly, not tied to any client comment or share link at all. */
+const SOURCE_MANUAL_EDIT = 'review_manual_edit';
 
 const DEFAULT_SIGNING_SUBJECT = 'Please review and sign: {{document_name}}';
 const DEFAULT_SIGNING_BODY = [
@@ -108,6 +111,7 @@ type CommentRow = {
   boxHPct: number | null;
   originalText: string | null;
   replacementText: string | null;
+  editedReplacementText: string | null;
   resultingVersionId: string | null;
   body: string;
   status: string;
@@ -171,6 +175,7 @@ export class ReviewService {
       boxHPct: c.boxHPct,
       originalText: c.originalText,
       replacementText: c.replacementText,
+      editedReplacementText: c.editedReplacementText,
       applied: c.kind === 'CHANGE' && c.resultingVersionId !== null,
       body: c.body,
       status: c.status as ReviewCommentStatus,
@@ -375,20 +380,36 @@ export class ReviewService {
     }
   }
 
-  /** Accept = "yes, make this change". It records the decision only; the PDF is written later, in one go, by applyChanges. */
-  async acceptComment(actor: AuthContext, commentId: string, input: { resolutionNote?: string | undefined }, meta: RequestMeta): Promise<ReviewCommentDto> {
+  /** Accept = "yes, make this change". It records the decision only; the PDF is written later, in one go, by
+   * applyChanges/incorporateChanges, which use `editedReplacementText` over the client's own `replacementText`
+   * whenever staff supplied one here -- the client's original submission is never overwritten. */
+  async acceptComment(
+    actor: AuthContext,
+    commentId: string,
+    input: { resolutionNote?: string | undefined; editedReplacementText?: string | undefined },
+    meta: RequestMeta
+  ): Promise<ReviewCommentDto> {
     const comment = await this.db.documentReviewComment.findUnique({ where: { id: commentId } });
     if (!comment || comment.status !== 'OPEN') throw new HttpError(404, 'Comment not found');
+    if (input.editedReplacementText !== undefined && comment.kind !== 'CHANGE') {
+      throw new HttpError(400, 'Only a suggested change can have its wording edited', 'VALIDATION_ERROR', [{ path: 'editedReplacementText', message: 'Only a CHANGE comment can carry this field' }]);
+    }
     const updated = await this.db.$transaction(async (tx) => {
       const c = await tx.documentReviewComment.update({
         where: { id: commentId },
-        data: { status: 'ACCEPTED', resolvedById: actor.userId, resolvedAt: new Date(), resolutionNote: input.resolutionNote ?? null },
+        data: {
+          status: 'ACCEPTED',
+          resolvedById: actor.userId,
+          resolvedAt: new Date(),
+          resolutionNote: input.resolutionNote ?? null,
+          ...(input.editedReplacementText !== undefined ? { editedReplacementText: input.editedReplacementText } : {}),
+        },
         include: { resolvedBy: { select: { id: true, name: true } } },
       });
       await this.closeLinkIfAnswered(tx, comment.shareLinkId);
       await recordAudit(tx, {
         actorType: 'USER', actorUserId: actor.userId, action: 'REVIEW_COMMENT_ACCEPTED', resourceType: 'document_review_comment', resourceId: commentId,
-        ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { shareLinkId: comment.shareLinkId, kind: comment.kind },
+        ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { shareLinkId: comment.shareLinkId, kind: comment.kind, wordingEdited: input.editedReplacementText !== undefined },
       });
       return c;
     });
@@ -442,7 +463,7 @@ export class ReviewService {
     try {
       edited = await applyReplacements(
         pdfBytes,
-        pending.map((c) => ({ pageNumber: c.pageNumber, xPct: c.xPct, yPct: c.yPct, wPct: c.boxWPct ?? 0, hPct: c.boxHPct ?? 0, text: c.replacementText ?? '' }))
+        pending.map((c) => ({ pageNumber: c.pageNumber, xPct: c.xPct, yPct: c.yPct, wPct: c.boxWPct ?? 0, hPct: c.boxHPct ?? 0, text: c.editedReplacementText ?? c.replacementText ?? '' }))
       );
     } catch (err) {
       if (err instanceof UnsupportedTextError) {
@@ -538,7 +559,7 @@ export class ReviewService {
     try {
       edited = await applyReplacements(
         pdfBytes,
-        pending.map((c) => ({ pageNumber: c.pageNumber, xPct: c.xPct, yPct: c.yPct, wPct: c.boxWPct ?? 0, hPct: c.boxHPct ?? 0, text: c.replacementText ?? '' }))
+        pending.map((c) => ({ pageNumber: c.pageNumber, xPct: c.xPct, yPct: c.yPct, wPct: c.boxWPct ?? 0, hPct: c.boxHPct ?? 0, text: c.editedReplacementText ?? c.replacementText ?? '' }))
       );
     } catch (err) {
       if (err instanceof UnsupportedTextError) {
@@ -573,6 +594,40 @@ export class ReviewService {
       },
     });
     return { ...done, applied: ids.length };
+  }
+
+  /**
+   * Staff editing the current version directly, anywhere on the page -- not tied to any client comment or share
+   * link. Reuses the exact same whiteout-and-redraw engine as applyChanges/incorporateChanges, just with
+   * staff-drawn boxes instead of a client's. All edits are written as ONE new version; a failure partway (an
+   * unsupported character, a box off the page) leaves the document exactly as it was.
+   */
+  async editDocumentText(actor: AuthContext, documentId: string, input: EditDocumentTextInput, meta: RequestMeta): Promise<{ versionId: string; versionNumber: number; edited: number }> {
+    const base = await this.loadCurrentVersion(documentId);
+    const pdfBytes = await this.readVersionBytes(base);
+    const pages = await pageCount(pdfBytes);
+    for (const e of input.edits) {
+      if (e.pageNumber > pages) throw new HttpError(409, `Page ${e.pageNumber} does not exist in this document (it has ${pages} page(s))`, 'CONFLICT');
+    }
+
+    let edited: Buffer;
+    try {
+      edited = await applyReplacements(pdfBytes, input.edits.map((e) => ({ pageNumber: e.pageNumber, xPct: e.xPct, yPct: e.yPct, wPct: e.wPct, hPct: e.hPct, text: e.text })));
+    } catch (err) {
+      if (err instanceof UnsupportedTextError) {
+        throw new HttpError(400, `${err.message}. Use plain letters and numbers.`, 'VALIDATION_ERROR');
+      }
+      throw err;
+    }
+
+    const done = await this.commitDerivedVersion({
+      actor, documentId, base, bytes: edited, meta,
+      changeNote: `Manually edited ${input.edits.length} spot${input.edits.length === 1 ? '' : 's'}`,
+      scanDetails: { source: SOURCE_MANUAL_EDIT, count: input.edits.length },
+      auditAction: 'DOCUMENT_TEXT_EDITED',
+      auditDetails: { count: input.edits.length },
+    });
+    return { ...done, edited: input.edits.length };
   }
 
   // ------------------------------------------------------------------ public, unauthenticated routes

@@ -3,6 +3,7 @@ import {
   applyReviewChangesSchema,
   createReviewCommentSchema,
   createShareLinkSchema,
+  editDocumentTextSchema,
   incorporateChangesSchema,
   reviewCommentDecisionSchema,
   stampSignatureSchema,
@@ -69,7 +70,7 @@ export function registerReviewRoutes(secure: SecureRouter, ctx: AppContext, revi
     asyncHandler(async (req, res) => {
       const { commentId } = req.params as unknown as z.infer<typeof commentParamSchema>;
       const body = req.body as z.infer<typeof reviewCommentDecisionSchema>;
-      res.json({ data: await review.acceptComment(req.auth!, commentId, { resolutionNote: body.resolutionNote }, auditContext(req)) });
+      res.json({ data: await review.acceptComment(req.auth!, commentId, { resolutionNote: body.resolutionNote, editedReplacementText: body.editedReplacementText }, auditContext(req)) });
     })
   );
 
@@ -90,6 +91,16 @@ export function registerReviewRoutes(secure: SecureRouter, ctx: AppContext, revi
     asyncHandler(async (req, res) => {
       const { id } = req.params as unknown as z.infer<typeof uuidParamSchema>;
       res.json({ data: await review.incorporateChanges(req.auth!, id, req.body as z.infer<typeof incorporateChangesSchema>, auditContext(req)) });
+    })
+  );
+
+  secure.post(
+    '/documents/:id/review/edit-text',
+    can('documents:manage', { reauth: true }),
+    validate({ params: uuidParamSchema, body: editDocumentTextSchema }),
+    asyncHandler(async (req, res) => {
+      const { id } = req.params as unknown as z.infer<typeof uuidParamSchema>;
+      res.json({ data: await review.editDocumentText(req.auth!, id, req.body as z.infer<typeof editDocumentTextSchema>, auditContext(req)) });
     })
   );
 

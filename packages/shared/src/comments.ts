@@ -53,6 +53,10 @@ export type CreateReviewCommentInput = z.output<typeof createReviewCommentSchema
 
 export const reviewCommentDecisionSchema = z.strictObject({
   resolutionNote: z.string().trim().max(500).optional(),
+  /** Accept only: staff's own wording, used instead of the client's `replacementText` when the PDF is written.
+   * The client's original submission is never changed -- only a CHANGE-kind, still-OPEN comment may carry this;
+   * the server rejects it otherwise. */
+  editedReplacementText: z.string().trim().min(1).max(MAX_CHANGE_TEXT).optional(),
 });
 
 /** REVIEW = "please review this"; SIGNING = "here is the final version to sign" (always attaches the PDF). */
@@ -85,6 +89,20 @@ export type StampSignatureInput = z.output<typeof stampSignatureSchema>;
 export const incorporateChangesSchema = z.strictObject({ shareLinkId: z.uuid(), signatureAssetId: z.uuid().optional() });
 export type IncorporateChangesInput = z.output<typeof incorporateChangesSchema>;
 
+/** One staff-drawn box, anywhere on the document, with the text to put there -- same shape as a client's
+ * suggested CHANGE, but not tied to any share link or client comment at all. */
+export const manualTextEditSchema = pinPositionSchema.extend({
+  wPct: z.number().gt(0).max(1),
+  hPct: z.number().gt(0).max(1),
+  text: z.string().trim().min(1).max(MAX_CHANGE_TEXT),
+}).refine((v) => v.xPct + v.wPct <= 1.000001, { message: 'The box runs off the right edge of the page', path: ['wPct'] })
+  .refine((v) => v.yPct + v.hPct <= 1.000001, { message: 'The box runs off the bottom edge of the page', path: ['hPct'] });
+export type ManualTextEdit = z.output<typeof manualTextEditSchema>;
+
+/** Staff editing the current version directly -- any number of spots in one go, written as a single new version. */
+export const editDocumentTextSchema = z.strictObject({ edits: z.array(manualTextEditSchema).min(1).max(20) });
+export type EditDocumentTextInput = z.output<typeof editDocumentTextSchema>;
+
 export interface ReviewCommentDto {
   id: string;
   shareLinkId: string;
@@ -97,6 +115,9 @@ export interface ReviewCommentDto {
   boxHPct: number | null;
   originalText: string | null;
   replacementText: string | null;
+  /** Set only if staff adjusted the wording at accept time; when present, this is what was (or will be) written
+   * into the PDF -- never `replacementText` directly once this is set. */
+  editedReplacementText: string | null;
   /** CHANGE only: true once the replacement has been written into a new PDF version. */
   applied: boolean;
   body: string;

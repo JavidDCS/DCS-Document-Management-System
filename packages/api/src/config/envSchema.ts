@@ -251,6 +251,10 @@ export const envObject = z.object({
       .pipe(z.array(z.email()).min(1))
       .optional()
   ),
+
+  // Self-hosted Stirling-PDF instance, read directly by the web build (vite.config.ts), not by the API. Declared
+  // here only so .env.example stays a single source of truth. Unset/empty: the "Open in PDF editor" button is hidden.
+  STIRLING_PDF_URL: z.preprocess(blankToUndefined, z.url().optional()),
 });
 
 /** Cross-field rules. Production is stricter: these mistakes would silently weaken security, so the API refuses to start. */

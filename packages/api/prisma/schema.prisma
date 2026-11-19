@@ -546,6 +546,9 @@ model DocumentReviewComment {
   boxHPct            Float?    @map("box_h_pct")
   originalText       String?   @map("original_text")
   replacementText    String?   @map("replacement_text")
+  /// Set only if staff adjusted the client's wording at accept time; when present, this is what actually gets
+  /// written into the PDF instead of `replacementText` -- the client's own submission is never overwritten.
+  editedReplacementText String? @map("edited_replacement_text")
   body               String
   status             String    @default("OPEN") // OPEN|ACCEPTED|DISMISSED (CHECK in SQL)
   resolvedById       String?   @map("resolved_by_id") @db.Uuid

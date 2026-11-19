@@ -58,6 +58,9 @@ export default defineConfig(({ mode }) => {
       'import.meta.env.GOOGLE_LOGIN_ENABLED': JSON.stringify(env.AUTH_GOOGLE_LOGIN_ENABLED || env.GOOGLE_LOGIN_ENABLED || 'false'),
       'import.meta.env.VITE_AUTH_PASSWORD_LOGIN_ENABLED': JSON.stringify(env.AUTH_PASSWORD_LOGIN_ENABLED || 'true'),
       'import.meta.env.AUTH_PASSWORD_LOGIN_ENABLED': JSON.stringify(env.AUTH_PASSWORD_LOGIN_ENABLED || 'true'),
+      // Self-hosted Stirling-PDF instance (see root .env.example, section 6). Empty string hides the "Open in PDF
+      // editor" button entirely -- this is an optional add-on, not a required service.
+      'import.meta.env.VITE_STIRLING_PDF_URL': JSON.stringify(env.STIRLING_PDF_URL || ''),
     },
     build: { sourcemap: false, target: 'es2022' },
     test: { environment: 'node', include: ['src/**/*.test.ts'] },
