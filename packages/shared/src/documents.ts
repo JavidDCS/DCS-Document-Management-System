@@ -20,6 +20,8 @@ export interface DocumentListItem {
   name: string;
   typeId: string;
   typeName: string;
+  /** The type's immutable slug -- not just its display name, for code that must recognise a specific type (e.g. a cross-app integration contract). */
+  typeKey: string;
   isActive: boolean;
   archiveStatus: ArchiveStatus;
   currentVersionNumber: number | null;
@@ -37,6 +39,9 @@ export interface VersionDto {
   scanStatus: ScanStatus;
   scanDetail: string | null;
   isCurrent: boolean;
+  /** True once this version has had the pre-approved signature stamped onto it (directly, or as part of the
+   * combined "incorporate changes" step) -- not just that *a* signature was ever added to some earlier version. */
+  hasSignature: boolean;
   changeNote: string | null;
   restoredFromVersionId: string | null;
   uploadedBy: { id: string; name: string };

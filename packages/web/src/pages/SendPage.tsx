@@ -13,6 +13,7 @@ interface Item {
   documentName: string;
   versionId: string;
   versionNumber: number;
+  typeKey: string;
   /** Clean versions the sender can choose from. */
   choices: { id: string; versionNumber: number; isCurrent: boolean }[];
 }
@@ -68,7 +69,7 @@ export function SendPage() {
         return;
       }
       setError(null);
-      setItems((cur) => cur.some((i) => i.documentId === d.id) ? cur : [...cur, { documentId: d.id, documentName: d.name, versionId: pick.id, versionNumber: pick.versionNumber, choices: clean.map((v) => ({ id: v.id, versionNumber: v.versionNumber, isCurrent: v.isCurrent })) }]);
+      setItems((cur) => cur.some((i) => i.documentId === d.id) ? cur : [...cur, { documentId: d.id, documentName: d.name, versionId: pick.id, versionNumber: pick.versionNumber, typeKey: d.typeKey, choices: clean.map((v) => ({ id: v.id, versionNumber: v.versionNumber, isCurrent: v.isCurrent })) }]);
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -123,6 +124,37 @@ export function SendPage() {
   // Sent separately from `request` (which also drives the preview fingerprint/idempotency key): the server
   // re-validates the hand-off itself, so it does not need to be part of what defines "the same content".
   const handoffIdToSend = handoff.data ? handoffId : null;
+
+  // An NDA is never emailed as a static attachment: it always goes out as a one-time, no-login review link, with
+  // or without a Leads Manager hand-off. This only applies to a single selected document -- composing several
+  // documents together, one of which happens to be an NDA, keeps today's attachment behaviour (a review link is
+  // fundamentally single-document).
+  const ndaMode = items.length === 1 && (items[0]!.typeKey === 'nda' || handoff.data?.documentTypeKey === 'nda');
+  const [reviewLinkEmail, setReviewLinkEmail] = useState('');
+  const [reviewLinkBusy, setReviewLinkBusy] = useState(false);
+  const [reviewLinkError, setReviewLinkError] = useState<unknown>(null);
+  useEffect(() => {
+    if (to.length > 0 && !reviewLinkEmail) setReviewLinkEmail(to[0]!);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [to]);
+
+  async function sendReviewLink() {
+    if (items.length !== 1) return;
+    setReviewLinkBusy(true);
+    setReviewLinkError(null);
+    try {
+      await api.post(`/documents/${items[0]!.documentId}/share-links`, {
+        recipientEmail: reviewLinkEmail.trim(),
+        ...(handoffIdToSend ? { handoffId: handoffIdToSend } : {}),
+      });
+      nav(`/documents/${items[0]!.documentId}#comments`);
+    } catch (e) {
+      setReviewLinkError(e);
+    } finally {
+      setReviewLinkBusy(false);
+    }
+  }
+
   const problems: string[] = [];
   if (items.length === 0) problems.push('Add at least one document.');
   if (to.length === 0) problems.push('Add at least one recipient in To.');
@@ -225,38 +257,58 @@ export function SendPage() {
             )}
           </div>
 
-          <div className="card stack !mb-0">
-            <h2>Recipients</h2>
-            <ChipInput label="To" values={to} onChange={setTo} />
-            <div className="grid gap-4 md:grid-cols-2">
-              <ChipInput label="CC" values={cc} onChange={setCc} />
-              <ChipInput label="BCC" values={bcc} onChange={setBcc} />
-            </div>
-            <small className="muted">The email is sent from your own address; replies come back to you.</small>
-          </div>
-
-          <div className="card stack !mb-0">
-            <h2>Message</h2>
-            {templates.data && templates.data.length > 0 && (
-              <label className="field"><span>Template</span>
-                <select value={templateId} onChange={(e) => applyTemplate(e.target.value)}>
-                  <option value="">— none —</option>
-                  {templates.data.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                </select>
+          {ndaMode ? (
+            <div className="card stack !mb-0">
+              <h2>Send for review</h2>
+              <InfoBanner>
+                An NDA is never attached directly — this sends a private, one-time link. The client opens it with no account, can leave comments and suggest changes, and your team is notified.
+              </InfoBanner>
+              <label className="field"><span>Client email</span>
+                <input type="email" value={reviewLinkEmail} onChange={(e) => setReviewLinkEmail(e.target.value)} placeholder="client@example.com" disabled={reviewLinkBusy} />
               </label>
-            )}
-            <label className="field"><span>Subject</span><input value={subject} onChange={(e) => setSubject(e.target.value)} maxLength={200} /></label>
-            <label className="field"><span>Message</span><textarea value={body} onChange={(e) => setBody(e.target.value)} rows={7} maxLength={20000} />
-              <small className="muted">Placeholders such as {'{{recipient_name}}'} or {'{{document_name}}'} are filled in by the server.</small>
-            </label>
-          </div>
+              {reviewLinkError != null && <ErrorBanner error={reviewLinkError} />}
+              <div className="row end">
+                <button className="btn primary" disabled={reviewLinkBusy || !reviewLinkEmail.trim()} onClick={sendReviewLink}>
+                  <SendIcon className="size-4" />{reviewLinkBusy ? 'Sending…' : 'Send review link'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="card stack !mb-0">
+                <h2>Recipients</h2>
+                <ChipInput label="To" values={to} onChange={setTo} />
+                <div className="grid gap-4 md:grid-cols-2">
+                  <ChipInput label="CC" values={cc} onChange={setCc} />
+                  <ChipInput label="BCC" values={bcc} onChange={setBcc} />
+                </div>
+                <small className="muted">The email is sent from your own address; replies come back to you.</small>
+              </div>
 
-          {problems.length > 0 && <ul className="hints" aria-live="polite">{problems.map((p) => <li key={p}>{p}</li>)}</ul>}
-          <div className="row end">
-            <button className="btn primary" disabled={busy || problems.length > 0} onClick={makePreview}>
-              {busy ? 'Preparing preview…' : 'Continue to review'}
-            </button>
-          </div>
+              <div className="card stack !mb-0">
+                <h2>Message</h2>
+                {templates.data && templates.data.length > 0 && (
+                  <label className="field"><span>Template</span>
+                    <select value={templateId} onChange={(e) => applyTemplate(e.target.value)}>
+                      <option value="">— none —</option>
+                      {templates.data.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    </select>
+                  </label>
+                )}
+                <label className="field"><span>Subject</span><input value={subject} onChange={(e) => setSubject(e.target.value)} maxLength={200} /></label>
+                <label className="field"><span>Message</span><textarea value={body} onChange={(e) => setBody(e.target.value)} rows={7} maxLength={20000} />
+                  <small className="muted">Placeholders such as {'{{recipient_name}}'} or {'{{document_name}}'} are filled in by the server.</small>
+                </label>
+              </div>
+
+              {problems.length > 0 && <ul className="hints" aria-live="polite">{problems.map((p) => <li key={p}>{p}</li>)}</ul>}
+              <div className="row end">
+                <button className="btn primary" disabled={busy || problems.length > 0} onClick={makePreview}>
+                  {busy ? 'Preparing preview…' : 'Continue to review'}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
 

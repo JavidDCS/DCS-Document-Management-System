@@ -596,12 +596,13 @@ model SignatureAsset {
 }
 
 /// A short-lived, single-use lookup key created by the sister "DCS Leads Manager" app before it sends someone here
-/// to send an NDA or Teaser. The id is unguessable (like a password-reset link) but not a bearer secret on its own
-/// -- the SendPage flow still requires the sender to sign in and review/confirm before anything is actually sent.
+/// to send a document of one of the two fixed types this integration contract supports. The id is unguessable
+/// (like a password-reset link) but not a bearer secret on its own -- the SendPage flow still requires the
+/// sender to sign in and review/confirm before anything is actually sent.
 model IntegrationHandoff {
   id              String    @id @default(uuid()) @db.Uuid
   toAddress       String    @map("to_address")
-  documentTypeKey String    @map("document_type_key") // nda | teaser (CHECK in SQL)
+  documentTypeKey String    @map("document_type_key") // one of the two integration-contract keys (CHECK in SQL)
   documentId      String?   @map("document_id") @db.Uuid
   ref             String // Leads Manager's own reference for this send; 1..100 chars (CHECK in SQL)
   requestedBy     String    @map("requested_by") // 1..200 chars (CHECK in SQL)

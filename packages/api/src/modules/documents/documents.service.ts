@@ -19,7 +19,7 @@ import { enqueueJob } from '../jobs/jobs.js';
 import { IntegrityError } from '../storage/fileCrypto.js';
 import type { FileService, StoredFile } from '../storage/fileService.js';
 import { aclAllows, aclWhere, type AccessRuleRow } from './documentAccess.js';
-import { assertEditable, lockDocument, nextVersionNumber, versionData } from './documentVersioning.js';
+import { assertEditable, lockDocument, nextVersionNumber, versionCarriesSignature, versionData } from './documentVersioning.js';
 
 export interface RequestMeta {
   ip: string | null;
@@ -40,7 +40,7 @@ export interface UploadedFile {
 type Tx = Prisma.TransactionClient;
 
 const docInclude = {
-  documentType: { select: { id: true, name: true } },
+  documentType: { select: { id: true, name: true, key: true } },
   tags: { include: { tag: { select: { id: true, name: true } } } },
   currentVersion: { select: { id: true, versionNumber: true } },
 } satisfies Prisma.DocumentInclude;
@@ -87,6 +87,7 @@ export class DocumentsService {
       name: d.name,
       typeId: d.documentType.id,
       typeName: d.documentType.name,
+      typeKey: d.documentType.key,
       isActive: d.isActive,
       archiveStatus: d.archiveStatus as ArchiveStatus,
       currentVersionNumber: d.currentVersion?.versionNumber ?? null,
@@ -106,6 +107,7 @@ export class DocumentsService {
       scanStatus: v.scanStatus as ScanStatus,
       scanDetail: manager ? scanDetailText(v.scanStatus, v.scanDetails) : null,
       isCurrent: v.id === currentId,
+      hasSignature: versionCarriesSignature(v.scanDetails),
       changeNote: v.changeNote,
       restoredFromVersionId: v.restoredFromVersionId,
       uploadedBy: v.uploadedBy,

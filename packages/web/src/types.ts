@@ -117,6 +117,7 @@ export interface VersionDto {
   scanStatus: ScanStatus;
   scanDetail: string | null;
   isCurrent: boolean;
+  hasSignature: boolean;
   changeNote: string | null;
   restoredFromVersionId: string | null;
   uploadedBy: { id: string; name: string };
@@ -128,6 +129,7 @@ export interface DocumentListItem {
   name: string;
   typeId: string;
   typeName: string;
+  typeKey: string;
   isActive: boolean;
   archiveStatus: ArchiveStatus;
   currentVersionNumber: number | null;

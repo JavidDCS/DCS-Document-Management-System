@@ -13,7 +13,12 @@ describe('no document type is hardcoded', () => {
     const roots = [path.resolve(__dirname, '../src'), path.resolve(__dirname, '../prisma'), path.resolve(__dirname, '../../shared/src')];
     // Exception: the Leads Manager handoff contract fixes two document-type keys ("nda"/"teaser") as a
     // deliberate cross-app vocabulary, not a document-type-system assumption -- scoped to its own files only.
-    const isIntegrationFile = (f: string) => /integrations?[\\/]|integration_handoffs/i.test(f);
+    // Matched on exact path segments (not a raw substring) so an ancestor folder that merely ends in
+    // "...-integration" (e.g. a worktree directory name) can never accidentally exempt unrelated files.
+    const isIntegrationFile = (f: string) => {
+      const segs = f.split(/[\\/]/);
+      return segs.includes('integrations') || segs.some((s) => s.includes('integration_handoffs')) || path.basename(f) === 'integrations.ts';
+    };
     for (const f of roots.flatMap(walk).filter((x) => /\.(ts|sql|prisma|json)$/.test(x) && !isIntegrationFile(x))) {
       const text = readFileSync(f, 'utf8');
       expect(text, f).not.toMatch(/\bNDA\b|\bmandate\b/i);

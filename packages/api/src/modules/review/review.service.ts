@@ -21,7 +21,15 @@ import type { AuthContext } from '../../types/express.js';
 import { HttpError } from '../../utils/httpError.js';
 import { logger } from '../../utils/logger.js';
 import { recordAudit } from '../audit/index.js';
-import { assertEditable, lockDocument, nextVersionNumber, versionData } from '../documents/documentVersioning.js';
+import {
+  assertEditable,
+  lockDocument,
+  nextVersionNumber,
+  REVIEW_SOURCE_APPLY,
+  REVIEW_SOURCE_INCORPORATE,
+  REVIEW_SOURCE_SIGNATURE,
+  versionData,
+} from '../documents/documentVersioning.js';
 import type { DocumentsService } from '../documents/documents.service.js';
 import type { EmailConnectionsService } from '../email/connections.service.js';
 import type { EmailService } from '../email/email.service.js';
@@ -49,8 +57,9 @@ const USABLE_LINK_STATUSES = new Set(['SENT', 'VIEWED', 'COMMENTED']);
 const MAX_COMMENTS_PER_LINK = 100;
 
 /** `scanDetails.source` of the versions this module creates; used to tell "derived from the reviewed PDF" apart from a fresh upload. */
-const SOURCE_APPLY = 'review_apply';
-const SOURCE_SIGNATURE = 'review_signature';
+const SOURCE_APPLY = REVIEW_SOURCE_APPLY;
+const SOURCE_SIGNATURE = REVIEW_SOURCE_SIGNATURE;
+const SOURCE_INCORPORATE = REVIEW_SOURCE_INCORPORATE;
 
 const DEFAULT_SIGNING_SUBJECT = 'Please review and sign: {{document_name}}';
 const DEFAULT_SIGNING_BODY = [
@@ -245,9 +254,12 @@ export class ReviewService {
 
     try {
       // Reuses EmailService's own external-send confirmation dance (preview -> confirmationToken -> send), the
-      // same mechanism that protects every other external send, rather than inventing a parallel one.
+      // same mechanism that protects every other external send, rather than inventing a parallel one. Passing
+      // `handoffId` through lets EmailService.send do its own hand-off validation/claim exactly as it already
+      // does for an attachment send, so a Leads Manager hand-off's ref still reaches sent-lookup through a
+      // review link instead of a raw attachment.
       const draftPreview = await this.email.preview(actor, draftInput);
-      const sendInput: SendInput = { ...draftInput, idempotencyKey: this.email.newKey(), confirmationToken: draftPreview.confirmationToken ?? undefined };
+      const sendInput: SendInput = { ...draftInput, idempotencyKey: this.email.newKey(), confirmationToken: draftPreview.confirmationToken ?? undefined, handoffId: input.handoffId };
       const sent = await this.email.send(actor, sendInput, meta);
       await this.db.documentShareLink.update({ where: { id: link.id }, data: { initialEmailMessageId: sent.id } });
     } catch (err) {
@@ -303,7 +315,7 @@ export class ReviewService {
   /** A PDF a person has a review open against is only a safe base for new edits while nothing else was uploaded since. */
   private assertDerivedFromReviewed(base: DocumentVersion, reviewedVersionId: string): void {
     const src = this.versionSource(base);
-    if (base.id === reviewedVersionId || src === SOURCE_APPLY || src === SOURCE_SIGNATURE) return;
+    if (base.id === reviewedVersionId || src === SOURCE_APPLY || src === SOURCE_SIGNATURE || src === SOURCE_INCORPORATE) return;
     throw new HttpError(409, 'A newer version was uploaded after this review link was sent, so the client\'s marks no longer line up. Send a fresh review link for the current version.', 'CONFLICT');
   }
 
@@ -491,6 +503,76 @@ export class ReviewService {
       auditAction: 'REVIEW_SIGNATURE_STAMPED',
       auditDetails: { signatureAssetId: signature.id },
     });
+  }
+
+  /**
+   * The one-button combined step: applies every ACCEPTED, not-yet-applied suggested change AND stamps the
+   * signature, as a SINGLE new version (not two, the way applyChanges + stampSignature separately produce).
+   * Everything happens in memory before anything is written, so a failure at any point (an unsupported
+   * character in a replacement, a signature page out of range, no signature configured) leaves the document
+   * exactly as it was -- never a half-applied version with changes but no signature, or vice versa.
+   */
+  async incorporateChanges(actor: AuthContext, documentId: string, input: { shareLinkId: string; signatureAssetId?: string | undefined }, meta: RequestMeta): Promise<{ versionId: string; versionNumber: number; applied: number }> {
+    const link = await this.db.documentShareLink.findFirst({ where: { id: input.shareLinkId, documentId } });
+    if (!link) throw new HttpError(404, 'Review link not found');
+
+    const open = await this.db.documentReviewComment.count({ where: { shareLinkId: link.id, status: 'OPEN' } });
+    if (open > 0) throw new HttpError(409, `Accept or dismiss the ${open} open comment${open === 1 ? '' : 's'} on this link first`, 'CONFLICT');
+
+    const pending = await this.db.documentReviewComment.findMany({
+      where: { shareLinkId: link.id, kind: 'CHANGE', status: 'ACCEPTED', resultingVersionId: null },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (pending.length === 0) throw new HttpError(409, 'There are no accepted changes waiting to be incorporated', 'CONFLICT');
+
+    const signature = input.signatureAssetId
+      ? await this.db.signatureAsset.findFirst({ where: { id: input.signatureAssetId, isActive: true } })
+      : await this.db.signatureAsset.findFirst({ where: { isDefault: true, isActive: true } });
+    if (!signature) throw new HttpError(409, 'No signature is configured; upload one and mark it as the default signature asset', 'CONFLICT');
+
+    const base = await this.loadCurrentVersion(documentId);
+    this.assertDerivedFromReviewed(base, link.versionId);
+
+    const pdfBytes = await this.readVersionBytes(base);
+    let edited: Buffer;
+    try {
+      edited = await applyReplacements(
+        pdfBytes,
+        pending.map((c) => ({ pageNumber: c.pageNumber, xPct: c.xPct, yPct: c.yPct, wPct: c.boxWPct ?? 0, hPct: c.boxHPct ?? 0, text: c.replacementText ?? '' }))
+      );
+    } catch (err) {
+      if (err instanceof UnsupportedTextError) {
+        throw new HttpError(400, `${err.message}. Dismiss that change or ask the client for plain letters and numbers.`, 'VALIDATION_ERROR');
+      }
+      if (err instanceof RangeError) throw new HttpError(409, 'One of the changes points at a page this document does not have', 'CONFLICT');
+      throw err;
+    }
+
+    const sigBytes = await this.files.readVerified(
+      'clean', signature.storageKey,
+      { keyId: signature.encryptionKeyId, wrappedKey: Buffer.from(signature.wrappedDataKey) },
+      { sha256: signature.sha256, size: Number(signature.sizeBytes) },
+      10 * 1024 * 1024
+    );
+    const pages = await pageCount(edited);
+    if (signature.pageNumber > pages) {
+      throw new HttpError(409, `The signature's page (${signature.pageNumber}) is beyond this document's ${pages} page(s)`, 'CONFLICT');
+    }
+    // Stamped last, on the already-edited bytes -- the signature always sits on top of the final text, never under it.
+    const stamped = await stamp({ pdfBytes: edited, signature: { bytes: sigBytes, pageNumber: signature.pageNumber, xPt: signature.xPt, yPt: signature.yPt, widthPt: signature.widthPt, heightPt: signature.heightPt } });
+
+    const ids = pending.map((c) => c.id);
+    const done = await this.commitDerivedVersion({
+      actor, documentId, base, bytes: stamped, meta,
+      changeNote: `Incorporated ${ids.length} accepted change${ids.length === 1 ? '' : 's'} and added the signature`,
+      scanDetails: { source: SOURCE_INCORPORATE, shareLinkId: link.id, commentIds: ids, signatureAssetId: signature.id },
+      auditAction: 'REVIEW_CHANGES_INCORPORATED',
+      auditDetails: { shareLinkId: link.id, commentIds: ids, signatureAssetId: signature.id },
+      after: async (tx, versionId) => {
+        await tx.documentReviewComment.updateMany({ where: { id: { in: ids } }, data: { resultingVersionId: versionId } });
+      },
+    });
+    return { ...done, applied: ids.length };
   }
 
   // ------------------------------------------------------------------ public, unauthenticated routes

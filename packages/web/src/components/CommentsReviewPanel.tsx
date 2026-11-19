@@ -1,4 +1,4 @@
-import type { ReviewCommentDto, ShareLinkDto, ShareLinkStatus } from '@dcs-docs/shared';
+import type { ReviewCommentDto, ShareLinkDto, ShareLinkStatus, SignatureAssetDto } from '@dcs-docs/shared';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { toast } from 'sonner';
 import { api } from '../api';
@@ -18,9 +18,6 @@ const LINK_STATUS_TONE: Record<ShareLinkStatus, 'warn' | 'ok' | 'neutral' | 'bad
   REVOKED: 'bad',
   FAILED: 'bad',
 };
-
-/** The change note the server writes on the version it creates when it stamps the signature. */
-const SIGNATURE_NOTE = 'Signature added';
 
 /** Step 1: email a client a one-time, no-login review link for the document's current version. */
 function SendForReviewForm({ doc, onSent }: { doc: DocumentDetail; onSent: () => void }) {
@@ -95,11 +92,11 @@ function SendForSigningForm({ doc, links, disabledReason, onSent }: { doc: Docum
   return (
     <form onSubmit={submit} className="flex flex-wrap items-end gap-2">
       <label className="stack gap-1">
-        <span className="text-xs font-medium">Send the final document for signing</span>
+        <span className="text-xs font-medium">Send the modified PDF for signing</span>
         <input type="email" required placeholder="client@example.com" value={email} onChange={(e) => setEmail(e.target.value)} className="input" disabled={sending} />
       </label>
-      <button type="submit" className="btn primary" disabled={sending || !email.trim() || disabledReason !== null} title={disabledReason ?? 'Email the current version to the client with the PDF attached'}>
-        {sending ? 'Sending…' : 'Send for signing'}
+      <button type="submit" className="btn primary" disabled={sending || !email.trim() || disabledReason !== null} title={disabledReason ?? 'Email the current version to the client with the PDF attached, for DocuSign signing'}>
+        {sending ? 'Sending…' : 'Send Modified PDF'}
       </button>
       {disabledReason && <span className="muted w-full text-xs">{disabledReason}</span>}
       {error != null && <ErrorBanner error={error} />}
@@ -116,6 +113,7 @@ function SendForSigningForm({ doc, links, disabledReason, onSent }: { doc: Docum
 export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentDetail; onDocumentChanged?: () => void }) {
   const comments = useLoad(async () => (await api.get<ReviewCommentDto[]>(`/documents/${doc.id}/review-comments`)).data, [doc.id]);
   const shareLinks = useLoad(async () => (await api.get<ShareLinkDto[]>(`/documents/${doc.id}/share-links`)).data, [doc.id]);
+  const signatures = useLoad(async () => (await api.get<SignatureAssetDto[]>('/signature-assets')).data, []);
   const [selected, setSelected] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfError, setPdfError] = useState<unknown>(null);
@@ -157,7 +155,8 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
     return m;
   }, [waiting]);
   const current = doc.versions.find((v) => v.id === doc.currentVersionId);
-  const signed = current?.changeNote === SIGNATURE_NOTE;
+  const signed = current?.hasSignature ?? false;
+  const hasDefaultSignature = (signatures.data ?? []).some((s) => s.isDefault && s.isActive);
 
   async function run(key: string, call: () => Promise<unknown>, success: string, changesDocument: boolean) {
     setBusy(key);
@@ -183,12 +182,15 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
   if (links.length === 0) next = 'Step 1: email the document to the client for review.';
   else if (list.length === 0) next = 'Waiting for the client. You will get an email as soon as they comment.';
   else if (openCount > 0) next = `Step 2: accept or dismiss each of the ${openCount} open comment${openCount === 1 ? '' : 's'}.`;
-  else if (waiting.length > 0) next = `Step 3: apply the ${waiting.length} accepted change${waiting.length === 1 ? '' : 's'} to the PDF.`;
-  else if (!signed) next = 'Step 4: add the signature to the final PDF.';
-  else next = 'Step 5: send the signed document to the client.';
+  else if (waiting.length > 0) next = `Step 3: click "Incorporate Changes" to apply the ${waiting.length} accepted change${waiting.length === 1 ? '' : 's'} and add the signature.`;
+  else next = 'Step 4: send the modified PDF to the client.';
 
-  const signDisabled = waiting.length > 0 ? 'Apply the accepted changes first. The signature goes on last.' : signed ? 'This version already carries the signature.' : null;
-  const sendDisabled = waiting.length > 0 ? 'Apply the accepted changes before sending.' : openCount > 0 ? 'Answer every open comment before sending.' : null;
+  // One button does both steps that used to be two: applying the accepted changes and stamping the signature.
+  const incorporateDisabled =
+    waiting.length === 0 ? 'Nothing is waiting to be incorporated -- accept a suggested change first.'
+    : !hasDefaultSignature ? 'No default signature is uploaded yet. Add one under Signature in the sidebar.'
+    : null;
+  const sendDisabled = waiting.length > 0 ? 'Incorporate the accepted changes before sending.' : openCount > 0 ? 'Answer every open comment before sending.' : null;
 
   return (
     <div className="card">
@@ -214,17 +216,18 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
                 <button
                   type="button"
                   className="btn small primary"
-                  disabled={busy !== null}
+                  disabled={busy !== null || !hasDefaultSignature}
+                  title={!hasDefaultSignature ? 'No default signature is uploaded yet' : 'Apply the accepted changes and stamp the signature, in one new version'}
                   onClick={() =>
                     run(
-                      `apply-${l.id}`,
-                      () => api.post(`/documents/${doc.id}/review/apply-changes`, { shareLinkId: l.id }),
-                      'Changes applied: a new version of the PDF was created',
+                      `incorporate-${l.id}`,
+                      () => api.post(`/documents/${doc.id}/review/incorporate-changes`, { shareLinkId: l.id }),
+                      'Changes incorporated: a new, signed version of the PDF was created',
                       true
                     )
                   }
                 >
-                  {busy === `apply-${l.id}` ? 'Applying…' : `Apply ${waitingByLink.get(l.id)} accepted change${waitingByLink.get(l.id) === 1 ? '' : 's'}`}
+                  {busy === `incorporate-${l.id}` ? 'Incorporating…' : `Incorporate Changes (${waitingByLink.get(l.id)})`}
                 </button>
               )}
             </div>
@@ -284,18 +287,7 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
       )}
 
       <div className="mt-5 stack gap-3 border-t pt-4">
-        <div className="row items-center gap-3">
-          <button
-            type="button"
-            className="btn"
-            disabled={busy !== null || signDisabled !== null}
-            title={signDisabled ?? 'Stamp the pre-approved signature onto the current version'}
-            onClick={() => run('sign', () => api.post(`/documents/${doc.id}/review/stamp-signature`, {}), 'Signature added: a new version of the PDF was created', true)}
-          >
-            {busy === 'sign' ? 'Adding…' : signed ? 'Signature added ✓' : 'Add signature'}
-          </button>
-          {signDisabled && !signed && <span className="muted text-xs">{signDisabled}</span>}
-        </div>
+        {signed && <p className="muted mb-0 text-xs">Current version carries the signature ✓</p>}
         <SendForSigningForm doc={doc} links={links} disabledReason={sendDisabled} onSent={shareLinks.reload} />
       </div>
     </div>

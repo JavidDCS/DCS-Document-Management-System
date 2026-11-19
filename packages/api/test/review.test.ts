@@ -421,6 +421,157 @@ describe.skipIf(skipDb)('external document review: share links, comments, accept
     });
   });
 
+  describe('incorporate-changes: the combined apply + stamp step, as ONE new version', () => {
+    const box = { kind: 'CHANGE', pageNumber: 1, xPct: 0.1, yPct: 0.2, boxWPct: 0.3, boxHPct: 0.04 };
+
+    async function startRound(replacementText: string) {
+      const documentId = await createActiveDocument(uniq('Incorporate doc'));
+      const link = await createLink(documentId);
+      const token = await extractToken(link.body.data.id);
+      const c = await publicPost(`/public/review/${token}/comments`, { ...box, replacementText });
+      expect(c.status, JSON.stringify(c.body)).toBe(201);
+      return { documentId, shareLinkId: link.body.data.id as string, commentId: c.body.data.id as string };
+    }
+
+    it('applies the accepted change and stamps the signature as a single new version -- not two', async () => {
+      const r = await startRound('Acme Solar');
+      await admin.post(`/review-comments/${r.commentId}/accept`, {});
+
+      const res = await admin.post(`/documents/${r.documentId}/review/incorporate-changes`, { shareLinkId: r.shareLinkId });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.data).toMatchObject({ versionNumber: 2, applied: 1 });
+
+      const doc = (await admin.get(`/documents/${r.documentId}`)).body.data;
+      expect(doc.versions).toHaveLength(2); // the original upload, plus exactly one combined version -- never two
+      expect(doc.versions[0]).toMatchObject({ isCurrent: true, versionNumber: 2, hasSignature: true });
+
+      const v2 = await prisma.documentVersion.findUniqueOrThrow({ where: { id: doc.versions[0].id } });
+      expect(v2.scanDetails).toMatchObject({ source: 'review_incorporate', signatureAssetId: defaultSignatureId });
+
+      const comments = (await admin.get(`/documents/${r.documentId}/review-comments`)).body.data;
+      expect(comments.find((c: any) => c.id === r.commentId)).toMatchObject({ applied: true });
+    });
+
+    it('refuses with a plain reason when nothing is accepted yet, and writes no version', async () => {
+      const r = await startRound('Acme Solar'); // left OPEN, never accepted
+      const res = await admin.post(`/documents/${r.documentId}/review/incorporate-changes`, { shareLinkId: r.shareLinkId });
+      expect(res.status).toBe(409);
+      expect(res.body.error.message).toMatch(/open comment/i);
+      expect((await admin.get(`/documents/${r.documentId}`)).body.data.versions).toHaveLength(1);
+
+      await admin.post(`/review-comments/${r.commentId}/dismiss`, {});
+      const res2 = await admin.post(`/documents/${r.documentId}/review/incorporate-changes`, { shareLinkId: r.shareLinkId });
+      expect(res2.status).toBe(409);
+      expect(res2.body.error.message).toMatch(/nothing.*accepted|waiting to be incorporated/i);
+      expect((await admin.get(`/documents/${r.documentId}`)).body.data.versions).toHaveLength(1);
+    });
+
+    it('refuses with a plain reason when no signature is configured, and writes no version even though the text edit would have succeeded', async () => {
+      const r = await startRound('Acme Solar');
+      await admin.post(`/review-comments/${r.commentId}/accept`, {});
+
+      // Temporarily take the only signature out of the running, then put it straight back for every other test.
+      expect((await admin.post(`/signature-assets/${defaultSignatureId}/deactivate`)).status).toBe(200);
+      try {
+        const res = await admin.post(`/documents/${r.documentId}/review/incorporate-changes`, { shareLinkId: r.shareLinkId });
+        expect(res.status).toBe(409);
+        expect(res.body.error.message).toMatch(/no signature is configured/i);
+        expect((await admin.get(`/documents/${r.documentId}`)).body.data.versions).toHaveLength(1); // the text edit was never written either
+      } finally {
+        // Re-activating does not restore isDefault on its own; set it again so the rest of the suite is unaffected.
+        const reactivated = await request(app)
+          .post('/api/v1/signature-assets')
+          .set(admin.auth())
+          .field('label', 'Primary signature (restored)')
+          .field('pageNumber', '1')
+          .field('xPt', '50')
+          .field('yPt', '50')
+          .field('widthPt', '120')
+          .field('heightPt', '48')
+          .attach('file', tinyJpeg(), { filename: 'sig.jpg', contentType: 'image/jpeg' });
+        expect(reactivated.status, JSON.stringify(reactivated.body)).toBe(201);
+        defaultSignatureId = reactivated.body.data.id;
+        expect((await admin.post(`/signature-assets/${defaultSignatureId}/set-default`)).body.data.isDefault).toBe(true);
+      }
+    });
+
+    it('the two older endpoints still work independently, producing two versions as before', async () => {
+      const r = await startRound('Still Separate Inc');
+      await admin.post(`/review-comments/${r.commentId}/accept`, {});
+      expect((await admin.post(`/documents/${r.documentId}/review/apply-changes`, { shareLinkId: r.shareLinkId })).status).toBe(200);
+      expect((await admin.post(`/documents/${r.documentId}/review/stamp-signature`, {})).status).toBe(200);
+      expect((await admin.get(`/documents/${r.documentId}`)).body.data.versions).toHaveLength(3);
+    });
+
+    it('is off-limits to a role without documents:review', async () => {
+      const r = await startRound('Acme Solar');
+      expect((await sender.post(`/documents/${r.documentId}/review/incorporate-changes`, { shareLinkId: r.shareLinkId })).status).toBe(403);
+    });
+  });
+
+  describe('a client only ever sees comments made through their own link', () => {
+    it('two different links on the same document never leak each other\'s comments to either client', async () => {
+      const documentId = await createActiveDocument(uniq('Shared doc'));
+
+      const linkA = await createLink(documentId, { recipientEmail: 'client-a@example.test' });
+      const tokenA = await extractToken(linkA.body.data.id);
+      const commentA = await publicPost(`/public/review/${tokenA}/comments`, { pageNumber: 1, xPct: 0.2, yPct: 0.2, body: 'Comment from client A' });
+      expect(commentA.status, JSON.stringify(commentA.body)).toBe(201);
+
+      // A's link is now terminal only once answered, so resend to get a second active link on the same document.
+      await admin.post(`/review-comments/${commentA.body.data.id}/dismiss`, {});
+      const linkB = await createLink(documentId, { recipientEmail: 'client-b@example.test', previousLinkId: linkA.body.data.id });
+      const tokenB = await extractToken(linkB.body.data.id);
+      const commentB = await publicPost(`/public/review/${tokenB}/comments`, { pageNumber: 1, xPct: 0.3, yPct: 0.3, body: 'Comment from client B' });
+      expect(commentB.status, JSON.stringify(commentB.body)).toBe(201);
+
+      const viewA = await request(app).get(`/api/v1/public/review/${tokenA}`);
+      expect(viewA.status).toBe(404); // A's own link is already terminal (dismissed) -- nothing more to see, not even its own history
+      const viewB = await request(app).get(`/api/v1/public/review/${tokenB}`);
+      expect(viewB.status, JSON.stringify(viewB.body)).toBe(200);
+      expect(viewB.body.data.comments).toHaveLength(1);
+      expect(viewB.body.data.comments[0].body).toBe('Comment from client B'); // never A's comment, even on the same document
+
+      // Staff, by contrast, see both -- comment isolation is a client-facing rule, not a data-deletion.
+      const staffView = (await admin.get(`/documents/${documentId}/review-comments`)).body.data;
+      expect(staffView.map((c: any) => c.body).sort()).toEqual(['Comment from client A', 'Comment from client B']);
+    });
+  });
+
+  describe('the test-mode allowlist also constrains the review-link send path', () => {
+    it('refuses to create (and email) a share link to an address not on the allowlist', async () => {
+      const limited = buildFullApp(
+        prisma,
+        { EMAIL_TEST_MODE_ALLOWLIST: ['allowed@decirclesolar.com'] },
+        { files: stack.files, scanner, emailProvider: mockProvider }
+      );
+      const limitedAdmin = await signIn(limited.app, admin.user.email);
+      {
+        const start = await limitedAdmin.post('/email/connection/start');
+        const state = new URL(start.body.data.url).searchParams.get('state')!;
+        await request(limited.app).get(`/api/v1/email/connection/callback?code=good&state=${state}`);
+      }
+      const uploadRes = await request(limited.app)
+        .post('/api/v1/documents')
+        .set(limitedAdmin.auth())
+        .field('typeId', typeId)
+        .field('name', uniq('Allowlisted doc'))
+        .field('metadata', '{}')
+        .attach('file', makePdf(), { filename: 'doc.pdf', contentType: 'application/pdf' });
+      expect(uploadRes.status, JSON.stringify(uploadRes.body)).toBe(201);
+      await limited.services.jobs.drain();
+      const documentId = uploadRes.body.data.id as string;
+      await limitedAdmin.post(`/documents/${documentId}/activate`);
+
+      const blocked = await limitedAdmin.post(`/documents/${documentId}/share-links`, { recipientEmail: 'not-allowed@example.com' });
+      expect(blocked.status).toBe(403);
+      expect(blocked.body.error.message).toMatch(/test mode is on/i);
+
+      const allowed = await limitedAdmin.post(`/documents/${documentId}/share-links`, { recipientEmail: 'allowed@decirclesolar.com' });
+      expect(allowed.status, JSON.stringify(allowed.body)).toBe(201);
+    });
+  });
+
   describe('dismiss, expiry and revocation', () => {
     it('dismiss resolves the comment and makes the link terminal too', async () => {
       const documentId = await createActiveDocument(uniq('Dismiss doc'));

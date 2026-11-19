@@ -377,4 +377,52 @@ describe.skipIf(skipDb)('Leads Manager integration (database)', () => {
       await services.jobs.drain();
     });
   });
+
+  describe('an NDA hand-off sent through a review link (not a raw attachment)', () => {
+    async function freshHandoff(to: string, ref: string) {
+      const created = await request(app).post('/api/v1/integrations/handoffs').set(headers()).send({ to, documentTypeKey: 'nda', documentId: ndaDocId, ref, requestedBy: 'lead-mgr' });
+      expect(created.status, JSON.stringify(created.body)).toBe(200);
+      return created.body.data.id as string;
+    }
+
+    it('carries the hand-off ref through to sent-lookup once the link email is SENT, and marks the hand-off used', async () => {
+      const ref = uniq('review-link-ref');
+      const handoffId = await freshHandoff('review-handoff@decirclesolar.com', ref);
+
+      const before = await request(app).post('/api/v1/integrations/sent-lookup').set(headers()).send({ refs: [ref] });
+      expect(before.status, JSON.stringify(before.body)).toBe(200);
+      expect(before.body.data).toEqual([]); // nothing sent yet
+
+      const linkRes = await sender.post(`/documents/${ndaDocId}/share-links`, { recipientEmail: 'review-handoff@decirclesolar.com', handoffId });
+      expect(linkRes.status, JSON.stringify(linkRes.body)).toBe(201);
+      await services.jobs.drain();
+
+      const handoffAfter = await prisma.integrationHandoff.findUniqueOrThrow({ where: { id: handoffId } });
+      expect(handoffAfter.usedAt).not.toBeNull();
+
+      const link = await prisma.documentShareLink.findUniqueOrThrow({ where: { id: linkRes.body.data.id } });
+      const msg = await prisma.emailMessage.findUniqueOrThrow({ where: { id: link.initialEmailMessageId! } });
+      expect(msg.externalRef).toBe(ref);
+      expect(msg.status).toBe('SENT'); // the job queue actually dispatched it, mocked provider included
+      // Link-only emails never attach the PDF, even for a hand-off.
+      expect(await prisma.emailAttachment.count({ where: { messageId: msg.id } })).toBe(0);
+
+      const after = await request(app).post('/api/v1/integrations/sent-lookup').set(headers()).send({ refs: [ref] });
+      expect(after.status, JSON.stringify(after.body)).toBe(200);
+      expect(after.body.data).toHaveLength(1);
+      expect(after.body.data[0]).toMatchObject({ ref });
+      expect(after.body.data[0].sentAt).toBeTruthy();
+    });
+
+    it('refuses when the share-link recipient no longer matches the hand-off address, and leaves the hand-off unused', async () => {
+      const ref = uniq('mismatched-ref');
+      const handoffId = await freshHandoff('matched@decirclesolar.com', ref);
+
+      const res = await sender.post(`/documents/${ndaDocId}/share-links`, { recipientEmail: 'different@decirclesolar.com', handoffId });
+      expect(res.status).toBe(400);
+
+      const handoffAfter = await prisma.integrationHandoff.findUniqueOrThrow({ where: { id: handoffId } });
+      expect(handoffAfter.usedAt).toBeNull();
+    });
+  });
 });

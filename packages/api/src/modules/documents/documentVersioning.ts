@@ -30,6 +30,19 @@ export function assertEditable(archiveStatus: string) {
   if (archiveStatus === 'ARCHIVED') throw new HttpError(409, 'This document is archived; unarchive it first', 'CONFLICT');
 }
 
+/** `scanDetails.source` values the review module writes for a version it derived rather than a fresh upload --
+ * shared here (not only in review.service.ts) so DocumentsService can also recognise "this version carries
+ * the signature" without either module reaching into the other's private constants. */
+export const REVIEW_SOURCE_APPLY = 'review_apply';
+export const REVIEW_SOURCE_SIGNATURE = 'review_signature';
+export const REVIEW_SOURCE_INCORPORATE = 'review_incorporate';
+const SIGNED_SOURCES: readonly string[] = [REVIEW_SOURCE_SIGNATURE, REVIEW_SOURCE_INCORPORATE];
+
+export function versionCarriesSignature(scanDetails: unknown): boolean {
+  const source = (scanDetails as { source?: unknown } | null)?.source;
+  return typeof source === 'string' && SIGNED_SOURCES.includes(source);
+}
+
 export function versionData(documentId: string, n: number, file: UploadedFile, actorId: string, changeNote?: string) {
   return {
     documentId,

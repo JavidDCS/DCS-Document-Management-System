@@ -1,5 +1,13 @@
 import { z } from 'zod';
-import { applyReviewChangesSchema, createReviewCommentSchema, createShareLinkSchema, reviewCommentDecisionSchema, stampSignatureSchema, uuidParamSchema } from '@dcs-docs/shared';
+import {
+  applyReviewChangesSchema,
+  createReviewCommentSchema,
+  createShareLinkSchema,
+  incorporateChangesSchema,
+  reviewCommentDecisionSchema,
+  stampSignatureSchema,
+  uuidParamSchema,
+} from '@dcs-docs/shared';
 import type { AppContext } from '../../app.js';
 import { can, PUBLIC, type SecureRouter } from '../../platform/auth/secureRouter.js';
 import { asyncHandler } from '../../platform/http/errorHandler.js';
@@ -72,6 +80,16 @@ export function registerReviewRoutes(secure: SecureRouter, ctx: AppContext, revi
     asyncHandler(async (req, res) => {
       const { id } = req.params as unknown as z.infer<typeof uuidParamSchema>;
       res.json({ data: await review.applyChanges(req.auth!, id, req.body as z.infer<typeof applyReviewChangesSchema>, auditContext(req)) });
+    })
+  );
+
+  secure.post(
+    '/documents/:id/review/incorporate-changes',
+    can('documents:review', { reauth: true }),
+    validate({ params: uuidParamSchema, body: incorporateChangesSchema }),
+    asyncHandler(async (req, res) => {
+      const { id } = req.params as unknown as z.infer<typeof uuidParamSchema>;
+      res.json({ data: await review.incorporateChanges(req.auth!, id, req.body as z.infer<typeof incorporateChangesSchema>, auditContext(req)) });
     })
   );
 

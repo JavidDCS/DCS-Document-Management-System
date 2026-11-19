@@ -66,6 +66,10 @@ export const createShareLinkSchema = z.strictObject({
   previousLinkId: z.uuid().optional(),
   attach: z.boolean().default(false),
   purpose: z.enum(SHARE_LINK_PURPOSES).default('REVIEW'),
+  /** Set only when this link is being sent in place of a Leads Manager hand-off's attachment-send; the server
+   * validates and claims it exactly as EmailService.send already does, so the hand-off's ref still reaches
+   * sent-lookup. A client can never set this for any other reason. */
+  handoffId: z.uuid().optional(),
 });
 export type CreateShareLinkInput = z.output<typeof createShareLinkSchema>;
 
@@ -76,6 +80,10 @@ export type ApplyReviewChangesInput = z.output<typeof applyReviewChangesSchema>;
 /** Stamps the pre-approved signature onto the document's current version as a new version. */
 export const stampSignatureSchema = z.strictObject({ signatureAssetId: z.uuid().optional() });
 export type StampSignatureInput = z.output<typeof stampSignatureSchema>;
+
+/** The one-button combined step: applies every accepted change and stamps the signature as a single new version. */
+export const incorporateChangesSchema = z.strictObject({ shareLinkId: z.uuid(), signatureAssetId: z.uuid().optional() });
+export type IncorporateChangesInput = z.output<typeof incorporateChangesSchema>;
 
 export interface ReviewCommentDto {
   id: string;
