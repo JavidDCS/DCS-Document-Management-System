@@ -232,6 +232,25 @@ export const envObject = z.object({
 
   // Logging
   LOG_LEVEL: z.enum(['error', 'warn', 'info', 'debug']).default('info'),
+
+  // Leads Manager integration (server-to-server: hand-offs, the type-filtered document list, sent-lookup).
+  // Unset/empty: every /api/v1/integrations/* route answers 503, "The integration is not switched on".
+  INTEGRATION_API_KEY: z.preprocess(
+    blankToUndefined,
+    z.string().min(16, 'INTEGRATION_API_KEY must be at least 16 characters').optional()
+  ),
+  INTEGRATION_HANDOFF_MINUTES: intInRange(1, 10_080, 60),
+  RATE_LIMIT_INTEGRATION_MAX_PER_HOUR: intInRange(1, 1_000_000, 120),
+  // Comma-separated allowlist used while testing: when set, it also constrains every other outbound email (see
+  // EmailService.send), not only hand-off mail, so a test server can never reach a real client by accident.
+  EMAIL_TEST_MODE_ALLOWLIST: z.preprocess(
+    blankToUndefined,
+    z
+      .string()
+      .transform((s) => s.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean))
+      .pipe(z.array(z.email()).min(1))
+      .optional()
+  ),
 });
 
 /** Cross-field rules. Production is stricter: these mistakes would silently weaken security, so the API refuses to start. */

@@ -70,6 +70,7 @@ model User {
   shareLinksCreated       DocumentShareLink[]    @relation("ShareLinkCreator")
   reviewCommentsResolved  DocumentReviewComment[] @relation("ReviewCommentResolver")
   signatureAssetsCreated  SignatureAsset[]        @relation("SignatureAssetCreator")
+  integrationHandoffsUsed IntegrationHandoff[]    @relation("HandoffUsedBy")
 
   @@index([createdById])
   @@index([status])
@@ -259,6 +260,7 @@ model Document {
   accessRules    DocumentAccessRule[]
   attachedTo     EmailAttachment[]
   shareLinks     DocumentShareLink[]
+  integrationHandoffs IntegrationHandoff[]
 
   @@index([documentTypeId])
   @@index([ownerId])
@@ -436,6 +438,9 @@ model EmailMessage {
   externalConfirmed Boolean   @default(false) @map("external_confirmed")
   errorCode         String?   @map("error_code")
   templateId        String?   @map("template_id") @db.Uuid
+  /// Set only from a validated IntegrationHandoff.ref at send time (never trusted from client input directly);
+  /// lets the Leads Manager app's sent-lookup endpoint find what it asked to have sent.
+  externalRef       String?   @map("external_ref")
   sentAt            DateTime? @map("sent_at") @db.Timestamptz(3)
   createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -453,6 +458,7 @@ model EmailMessage {
   @@index([templateId])
   @@index([status])
   @@index([createdAt])
+  @@index([externalRef])
   @@map("email_messages")
 }
 
@@ -587,4 +593,28 @@ model SignatureAsset {
 
   @@index([isActive])
   @@map("signature_assets")
+}
+
+/// A short-lived, single-use lookup key created by the sister "DCS Leads Manager" app before it sends someone here
+/// to send an NDA or Teaser. The id is unguessable (like a password-reset link) but not a bearer secret on its own
+/// -- the SendPage flow still requires the sender to sign in and review/confirm before anything is actually sent.
+model IntegrationHandoff {
+  id              String    @id @default(uuid()) @db.Uuid
+  toAddress       String    @map("to_address")
+  documentTypeKey String    @map("document_type_key") // nda | teaser (CHECK in SQL)
+  documentId      String?   @map("document_id") @db.Uuid
+  ref             String // Leads Manager's own reference for this send; 1..100 chars (CHECK in SQL)
+  requestedBy     String    @map("requested_by") // 1..200 chars (CHECK in SQL)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  expiresAt       DateTime  @map("expires_at") @db.Timestamptz(3)
+  usedAt          DateTime? @map("used_at") @db.Timestamptz(3)
+  usedByUserId    String?   @map("used_by_user_id") @db.Uuid
+
+  document   Document? @relation(fields: [documentId], references: [id], onDelete: Restrict)
+  usedByUser User?     @relation("HandoffUsedBy", fields: [usedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([expiresAt])
+  @@index([documentId])
+  @@index([usedByUserId])
+  @@map("integration_handoffs")
 }

@@ -156,6 +156,16 @@ export interface GmailConnection {
   available: boolean;
 }
 
+/** SendPage's own read of a `?handoff=<id>` link opened from the Leads Manager app. */
+export interface HandoffLookup {
+  to: string;
+  documentTypeKey: 'nda' | 'teaser';
+  documentTypeId: string | null;
+  documentId: string | null;
+  documentName: string | null;
+  ref: string;
+}
+
 export interface EmailTemplate {
   id: string;
   name: string;

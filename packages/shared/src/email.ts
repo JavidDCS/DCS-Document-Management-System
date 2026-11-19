@@ -60,6 +60,14 @@ export const sendSchema = z.strictObject({
   ...draftShape,
   idempotencyKey: z.uuid(),
   confirmationToken: z.string().min(10).max(1000).optional(),
+  /** Set only when this send fulfils a Leads Manager hand-off; the server re-validates it, never trusts it blindly. */
+  handoffId: z.uuid().optional(),
+  /**
+   * Accepted but never trusted: a client-supplied value here is always ignored. The column it would fill is set
+   * only from a valid `handoffId`, resolved server-side. Present purely so a stray client field does not fail
+   * strict validation; see EmailService.send.
+   */
+  externalRef: z.string().max(500).optional(),
 });
 export type SendInput = z.output<typeof sendSchema>;
 
