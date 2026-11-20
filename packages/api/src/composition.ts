@@ -37,6 +37,7 @@ import type { SecureRouter } from './platform/auth/secureRouter.js';
 import { GmailProvider } from './providers/email/gmail.js';
 import type { EmailProvider } from './providers/email/types.js';
 import { GoogleOidcProvider } from './providers/identity/googleOidc.js';
+import { StirlingPdfProvider } from './providers/pdf/stirlingPdf.js';
 import { EnvKeyProvider, decodeMasterKey, parseKeyList } from './providers/keys/envKeyProvider.js';
 import { createStorageProvider, type StorageEnv } from './providers/storage/factory.js';
 
@@ -71,6 +72,8 @@ export type ServicesConfig = AppConfig &
     INTEGRATION_API_KEY?: string | undefined;
     INTEGRATION_HANDOFF_MINUTES: number;
     EMAIL_TEST_MODE_ALLOWLIST?: string[] | undefined;
+    STIRLING_PDF_URL?: string | undefined;
+    STIRLING_PDF_API_KEY?: string | undefined;
   };
 
 export interface ServiceDeps {
@@ -80,6 +83,7 @@ export interface ServiceDeps {
   usage?: DocumentUsage;
   emailProvider?: EmailProvider;
   googleProvider?: GoogleOidcProvider;
+  stirlingPdf?: StirlingPdfProvider;
 }
 
 /** The composition root: the only place that wires concrete services together. */
@@ -110,8 +114,9 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
 
   const integrations = new IntegrationsService(db, { handoffMinutes: cfg.INTEGRATION_HANDOFF_MINUTES, allowlist: cfg.EMAIL_TEST_MODE_ALLOWLIST });
 
+  const stirlingPdf = deps.stirlingPdf ?? new StirlingPdfProvider({ url: cfg.STIRLING_PDF_URL, apiKey: cfg.STIRLING_PDF_API_KEY });
   const reviewConfig: ReviewConfig = { APP_PUBLIC_URL: publicUrl, STORAGE_MAX_FILE_SIZE_MB: cfg.STORAGE_MAX_FILE_SIZE_MB };
-  const review = new ReviewService(db, deps.files, documents, email, emailConnections, reviewConfig);
+  const review = new ReviewService(db, deps.files, documents, email, emailConnections, stirlingPdf, reviewConfig);
   const signatureAssets = new SignatureAssetsService(db, deps.files);
 
   users.onDeactivate(async (tx, userId) => {

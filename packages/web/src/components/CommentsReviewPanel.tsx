@@ -1,12 +1,15 @@
-import type { ReviewCommentDto, ShareLinkDto, ShareLinkStatus, SignatureAssetDto } from '@dcs-docs/shared';
+import type { ReviewCommentDto, ShareLinkDto, ShareLinkStatus } from '@dcs-docs/shared';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { toast } from 'sonner';
 import { api } from '../api';
+import { FilePicker } from './FilePicker';
 import { useLoad } from '../hooks';
-import { fmtDateTime } from '../lib/format';
+import { fmtDateTime, saveBlob } from '../lib/format';
 import type { DocumentDetail } from '../types';
 import { PdfCanvasViewer } from './pdf/PdfCanvasViewer';
-import { Badge, ErrorBanner, InfoBanner, Spinner, cn } from './ui';
+import { Badge, ConfirmDialog, ErrorBanner, InfoBanner, Spinner, cn } from './ui';
+
+const STIRLING_PDF_URL = (import.meta.env.VITE_STIRLING_PDF_URL as string | undefined)?.trim();
 
 const STATUS_TONE: Record<ReviewCommentDto['status'], 'warn' | 'ok' | 'neutral'> = { OPEN: 'warn', ACCEPTED: 'ok', DISMISSED: 'neutral' };
 const LINK_STATUS_TONE: Record<ShareLinkStatus, 'warn' | 'ok' | 'neutral' | 'bad'> = {
@@ -55,65 +58,145 @@ function SendForReviewForm({ doc, onSent }: { doc: DocumentDetail; onSent: () =>
   );
 }
 
-/** Step 6: email the final PDF (attached, with a link) to the client for signing. */
-function SendForSigningForm({ doc, links, disabledReason, onSent }: { doc: DocumentDetail; links: ShareLinkDto[]; disabledReason: string | null; onSent: () => void }) {
+/**
+ * Opens the current version directly in a self-hosted Stirling-PDF instance (no manual upload) so staff can make
+ * the changes the client asked for, right from this tab. Lives here instead of a separate "Edit document" tab.
+ */
+function EditInStirlingSection({ doc }: { doc: DocumentDetail }) {
+  const [opening, setOpening] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  async function downloadCurrent() {
+    if (!doc.currentVersionId) return;
+    const r = await api.blob(`/documents/${doc.id}/versions/${doc.currentVersionId}/content`);
+    saveBlob(r.blob, r.filename ?? 'document.pdf');
+  }
+
+  async function openInStirling() {
+    // Navigates this same tab (not a new one), full-screen, since Stirling-PDF refuses to be framed inside our
+    // page (it sends X-Frame-Options: DENY) -- this is as close to "inside the app" as it can get.
+    setOpening(true);
+    setError(null);
+    try {
+      const r = await api.post<{ url: string }>(`/documents/${doc.id}/review/stirling-link`, {});
+      window.location.href = r.data.url;
+    } catch (e) {
+      setError(e);
+      setOpening(false);
+    }
+  }
+
+  if (!STIRLING_PDF_URL) return null;
+
+  return (
+    <div className="stack gap-2 rounded-lg border p-3 text-sm">
+      <span className="text-xs font-medium">Make the changes above</span>
+      <p className="muted mb-0 text-xs">Opens the current file in the PDF editor. Download the result there, then use "Send a modified copy" below -- use your browser's Back button to return here.</p>
+      {error != null && <ErrorBanner error={error} />}
+      <div className="row">
+        <button type="button" className="btn small primary" onClick={openInStirling} disabled={opening}>{opening ? 'Opening…' : 'Open PDF editor'}</button>
+        <button type="button" className="btn small" onClick={downloadCurrent}>Download current PDF</button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Sends a locally-edited file (e.g. downloaded from Stirling-PDF after filling in the client's requested blanks)
+ * straight to the client as an email attachment. No new DocumentVersion is created and the document's current
+ * version never changes -- this is the only send step now; there is no separate incorporate/signature step.
+ */
+function SendModifiedCopyForm({ doc, links }: { doc: DocumentDetail; links: ShareLinkDto[] }) {
   const latest = links[0];
   const [email, setEmail] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [note, setNote] = useState('');
+  const [confirming, setConfirming] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
-  // The person the review went to is almost always who signs; prefill once their link is known, but never overwrite typing.
   useEffect(() => {
     if (latest && !email) setEmail(latest.recipientEmail);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [latest?.recipientEmail]);
 
-  async function submit(e: FormEvent) {
-    e.preventDefault();
+  // A preview of exactly the file about to be sent -- so staff can check it's the right one before confirming.
+  useEffect(() => {
+    if (!file) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  async function go() {
+    if (!file) return;
     setSending(true);
     setError(null);
+    const form = new FormData();
+    form.append('file', file, file.name);
+    form.append('recipientEmail', email.trim());
+    if (note.trim()) form.append('note', note.trim());
     try {
-      // The server only accepts a "resend" built on a link that has finished (accepted or dismissed).
-      const previous = links.find((l) => l.status === 'ACCEPTED' || l.status === 'DISMISSED');
-      await api.post(`/documents/${doc.id}/share-links`, {
-        recipientEmail: email.trim(),
-        purpose: 'SIGNING',
-        ...(previous && previous.recipientEmail === email.trim().toLowerCase() ? { previousLinkId: previous.id } : {}),
-      });
-      toast.success(`The final document was emailed to ${email.trim()} for signing`);
-      onSent();
-    } catch (err) {
-      setError(err);
+      await api.upload(`/documents/${doc.id}/review/send-modified-copy`, form);
+      toast.success(`Sent to ${email.trim()}`);
+      setFile(null);
+      setNote('');
+    } catch (e) {
+      setError(e);
+      throw e;
     } finally {
       setSending(false);
     }
   }
 
   return (
-    <form onSubmit={submit} className="flex flex-wrap items-end gap-2">
-      <label className="stack gap-1">
-        <span className="text-xs font-medium">Send the modified PDF for signing</span>
-        <input type="email" required placeholder="client@example.com" value={email} onChange={(e) => setEmail(e.target.value)} className="input" disabled={sending} />
-      </label>
-      <button type="submit" className="btn primary" disabled={sending || !email.trim() || disabledReason !== null} title={disabledReason ?? 'Email the current version to the client with the PDF attached, for DocuSign signing'}>
-        {sending ? 'Sending…' : 'Send Modified PDF'}
-      </button>
-      {disabledReason && <span className="muted w-full text-xs">{disabledReason}</span>}
+    <div className="stack gap-2 rounded-xl border bg-muted/30 p-4">
+      <span className="text-sm font-medium">Send a modified copy (e.g. edited in Stirling-PDF)</span>
+      <p className="muted mb-0 text-xs">Goes straight to the client as an attachment -- this never becomes a new version of the document.</p>
+      <FilePicker file={file} onPick={setFile} maxMb={doc.type.maxFileSizeMb} />
+      {file && (
+        <div className="stack gap-1">
+          <span className="muted text-xs">Preview of "{file.name}" -- check this is correct before sending</span>
+          {previewUrl ? (
+            <iframe src={previewUrl} title="Selected file preview" className="preview-frame" style={{ width: '100%', height: '60vh', border: 0 }} />
+          ) : (
+            <p className="muted mb-0 text-xs">This file does not look like a PDF, so it cannot be previewed here.</p>
+          )}
+        </div>
+      )}
+      <label className="field"><span>Client email</span><input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} disabled={sending} /></label>
+      <label className="field"><span>Note (optional)</span><input value={note} onChange={(e) => setNote(e.target.value)} maxLength={500} disabled={sending} /></label>
       {error != null && <ErrorBanner error={error} />}
-    </form>
+      <div className="row end">
+        <button type="button" className="btn primary" disabled={!file || !email.trim() || sending} onClick={() => setConfirming(true)}>
+          {sending ? 'Sending…' : 'Send Modified PDF'}
+        </button>
+      </div>
+      {confirming && (
+        <ConfirmDialog
+          title="Send this file to the client?"
+          message={`"${file?.name}" is emailed to ${email.trim()} right now. The document's current version is not changed.`}
+          confirmLabel="Send"
+          onClose={() => setConfirming(false)}
+          onConfirm={go}
+        />
+      )}
+    </div>
   );
 }
 
 /**
- * Staff side of the external review, as one left-to-right workflow:
- *   send link -> client comments -> accept/dismiss each -> apply accepted changes -> add signature -> send for signing.
- * The panel always tells staff which step is next. It reuses the page's already-loaded `doc`; after a step writes a
- * new version it asks the page to reload (`onDocumentChanged`) so the version list and this viewer follow along.
+ * Staff side of the external review, as one left-to-right workflow: send link -> client comments ->
+ * accept/dismiss each -> prepare the modified PDF elsewhere (e.g. Stirling-PDF) -> send it to the client.
+ * The panel always tells staff which step is next. It reuses the page's already-loaded `doc`.
  */
-export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentDetail; onDocumentChanged?: () => void }) {
+export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
   const comments = useLoad(async () => (await api.get<ReviewCommentDto[]>(`/documents/${doc.id}/review-comments`)).data, [doc.id]);
   const shareLinks = useLoad(async () => (await api.get<ShareLinkDto[]>(`/documents/${doc.id}/share-links`)).data, [doc.id]);
-  const signatures = useLoad(async () => (await api.get<SignatureAssetDto[]>('/signature-assets')).data, []);
   const [selected, setSelected] = useState<string | null>(null);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfError, setPdfError] = useState<unknown>(null);
@@ -148,17 +231,8 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
   const links = shareLinks.data ?? [];
 
   const openCount = list.filter((c) => c.status === 'OPEN').length;
-  const waiting = list.filter((c) => c.kind === 'CHANGE' && c.status === 'ACCEPTED' && !c.applied);
-  const waitingByLink = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const c of waiting) m.set(c.shareLinkId, (m.get(c.shareLinkId) ?? 0) + 1);
-    return m;
-  }, [waiting]);
-  const current = doc.versions.find((v) => v.id === doc.currentVersionId);
-  const signed = current?.hasSignature ?? false;
-  const hasDefaultSignature = (signatures.data ?? []).some((s) => s.isDefault && s.isActive);
 
-  async function run(key: string, call: () => Promise<unknown>, success: string, changesDocument: boolean) {
+  async function run(key: string, call: () => Promise<unknown>, success: string) {
     setBusy(key);
     setActionError(null);
     try {
@@ -166,7 +240,6 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
       toast.success(success);
       comments.reload();
       shareLinks.reload();
-      if (changesDocument) onDocumentChanged?.();
     } catch (e) {
       setActionError(e);
     } finally {
@@ -175,39 +248,28 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
   }
 
   const decide = (id: string, action: 'accept' | 'dismiss') =>
-    run(id, () => api.post(`/review-comments/${id}/${action}`), action === 'accept' ? 'Accepted' : 'Dismissed', false);
-
-  // Staff's own wording for a suggested change, keyed by comment id -- only sent on Accept, and only if it
-  // actually differs from what the client proposed. The client's own submission is never touched.
-  const [edits, setEdits] = useState<Record<string, string>>({});
-  const acceptChange = (c: ReviewCommentDto) => {
-    const edited = edits[c.id]?.trim();
-    const body = edited && edited !== c.replacementText ? { editedReplacementText: edited } : {};
-    return run(c.id, () => api.post(`/review-comments/${c.id}/accept`, body), 'Accepted', false);
-  };
+    run(id, () => api.post(`/review-comments/${id}/${action}`), action === 'accept' ? 'Accepted' : 'Dismissed');
 
   // "What now?" -- the one line a person needs, in the order the work actually happens.
   let next: string;
   if (links.length === 0) next = 'Step 1: email the document to the client for review.';
   else if (list.length === 0) next = 'Waiting for the client. You will get an email as soon as they comment.';
   else if (openCount > 0) next = `Step 2: accept or dismiss each of the ${openCount} open comment${openCount === 1 ? '' : 's'}.`;
-  else if (waiting.length > 0) next = `Step 3: click "Incorporate Changes" to apply the ${waiting.length} accepted change${waiting.length === 1 ? '' : 's'} and add the signature.`;
-  else next = 'Step 4: send the modified PDF to the client.';
-
-  // One button does both steps that used to be two: applying the accepted changes and stamping the signature.
-  const incorporateDisabled =
-    waiting.length === 0 ? 'Nothing is waiting to be incorporated -- accept a suggested change first.'
-    : !hasDefaultSignature ? 'No default signature is uploaded yet. Add one under Signature in the sidebar.'
-    : null;
-  const sendDisabled = waiting.length > 0 ? 'Incorporate the accepted changes before sending.' : openCount > 0 ? 'Answer every open comment before sending.' : null;
+  else next = 'Step 3: prepare the modified PDF (e.g. in Stirling-PDF) and send it to the client below.';
 
   return (
     <div className="card">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h2 className="!mb-0">Client review</h2>
+        {list.length > 0 && (
+          <span className="muted text-xs">
+            {list.length} request{list.length === 1 ? '' : 's'} from the client · {openCount} open · {list.filter((c) => c.status === 'ACCEPTED').length} accepted · {list.filter((c) => c.status === 'DISMISSED').length} dismissed
+          </span>
+        )}
       </div>
 
       <InfoBanner>{next}</InfoBanner>
+      <p className="muted mb-0 mt-1 text-xs">This page only shows what the client asked to change -- nothing here can be edited.</p>
 
       <div className="my-4">
         <SendForReviewForm doc={doc} onSent={shareLinks.reload} />
@@ -221,24 +283,6 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
               <Badge tone={LINK_STATUS_TONE[l.status]}>{l.status}</Badge>
               <span>{l.recipientEmail}</span>
               <span className="muted text-xs">· {fmtDateTime(l.createdAt)}</span>
-              {(waitingByLink.get(l.id) ?? 0) > 0 && openCount === 0 && (
-                <button
-                  type="button"
-                  className="btn small primary"
-                  disabled={busy !== null || !hasDefaultSignature}
-                  title={!hasDefaultSignature ? 'No default signature is uploaded yet' : 'Apply the accepted changes and stamp the signature, in one new version'}
-                  onClick={() =>
-                    run(
-                      `incorporate-${l.id}`,
-                      () => api.post(`/documents/${doc.id}/review/incorporate-changes`, { shareLinkId: l.id }),
-                      'Changes incorporated: a new, signed version of the PDF was created',
-                      true
-                    )
-                  }
-                >
-                  {busy === `incorporate-${l.id}` ? 'Incorporating…' : `Incorporate Changes (${waitingByLink.get(l.id)})`}
-                </button>
-              )}
             </div>
           ))}
         </div>
@@ -280,22 +324,10 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
                   </p>
                 ) : null}
                 {c.kind === 'COMMENT' || !c.body.startsWith('Change ') ? <p className="mb-0 mt-1 whitespace-pre-wrap">{c.body}</p> : null}
-                {c.kind === 'CHANGE' && c.status === 'OPEN' && (
-                  <label className="field mt-2" onClick={(e) => e.stopPropagation()}>
-                    <span className="text-xs font-medium">Edit before accepting (optional)</span>
-                    <input
-                      type="text"
-                      value={edits[c.id] ?? c.replacementText ?? ''}
-                      onChange={(e) => setEdits((cur) => ({ ...cur, [c.id]: e.target.value }))}
-                      disabled={busy !== null}
-                      maxLength={300}
-                    />
-                  </label>
-                )}
                 {c.status === 'OPEN' && (
                   <div className="row mt-2">
                     <button type="button" className="btn small" disabled={busy !== null} onClick={(e) => { e.stopPropagation(); decide(c.id, 'dismiss'); }}>Dismiss</button>
-                    <button type="button" className="btn small primary" disabled={busy !== null} onClick={(e) => { e.stopPropagation(); c.kind === 'CHANGE' ? acceptChange(c) : decide(c.id, 'accept'); }}>Accept</button>
+                    <button type="button" className="btn small primary" disabled={busy !== null} onClick={(e) => { e.stopPropagation(); decide(c.id, 'accept'); }}>Accept</button>
                   </div>
                 )}
                 {c.resolvedBy && (
@@ -306,13 +338,13 @@ export function CommentsReviewPanel({ doc, onDocumentChanged }: { doc: DocumentD
                 )}
               </div>
             ))}
+            <EditInStirlingSection doc={doc} />
           </div>
         </div>
       )}
 
       <div className="mt-5 stack gap-3 border-t pt-4">
-        {signed && <p className="muted mb-0 text-xs">Current version carries the signature ✓</p>}
-        <SendForSigningForm doc={doc} links={links} disabledReason={sendDisabled} onSent={shareLinks.reload} />
+        <SendModifiedCopyForm doc={doc} links={links} />
       </div>
     </div>
   );

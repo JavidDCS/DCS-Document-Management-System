@@ -6,6 +6,7 @@ import { EnvKeyProvider } from '../../src/providers/keys/envKeyProvider.js';
 import type { StorageProvider } from '../../src/providers/storage/types.js';
 import type { EmailProvider } from '../../src/providers/email/types.js';
 import type { GoogleOidcProvider } from '../../src/providers/identity/googleOidc.js';
+import type { StirlingPdfProvider } from '../../src/providers/pdf/stirlingPdf.js';
 import { FakeScanner } from './storage.js';
 import type { PrismaClient } from '@prisma/client';
 import request from 'supertest';
@@ -53,6 +54,7 @@ export interface TestDeps {
   scanner?: MalwareScanner;
   emailProvider?: EmailProvider;
   googleProvider?: GoogleOidcProvider;
+  stirlingPdf?: StirlingPdfProvider;
 }
 
 export function buildFullApp(prisma: PrismaClient, overrides: Partial<ServicesConfig> = {}, deps: TestDeps = {}) {
@@ -63,6 +65,7 @@ export function buildFullApp(prisma: PrismaClient, overrides: Partial<ServicesCo
     ...(deps.usage ? { usage: deps.usage } : {}),
     ...(deps.emailProvider ? { emailProvider: deps.emailProvider } : {}),
     ...(deps.googleProvider ? { googleProvider: deps.googleProvider } : {}),
+    ...(deps.stirlingPdf ? { stirlingPdf: deps.stirlingPdf } : {}),
   });
   const app = createApp({
     config: cfg,

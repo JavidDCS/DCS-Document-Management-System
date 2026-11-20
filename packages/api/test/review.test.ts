@@ -4,6 +4,7 @@ import { inflateSync } from 'node:zlib';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { EmailProvider } from '../src/providers/email/types.js';
+import { StirlingPdfProvider } from '../src/providers/pdf/stirlingPdf.js';
 import { ALLOWED_ORIGIN } from './helpers/app.js';
 import { buildFullApp, createTestUser, csrfPair, signIn, type Client } from './helpers/fullApp.js';
 import { skipDb, testPrisma } from './helpers/db.js';
@@ -32,6 +33,19 @@ class MockEmailProvider implements EmailProvider {
     this.sentMessages.push({ accessToken, raw: rawMessage });
     return { providerMessageId: `msg_${Date.now()}_${Math.random().toString(36).slice(2)}` };
   }
+}
+
+/** Fakes just enough of Stirling-PDF's REST API (the upload endpoint) to drive the provider without a network call. */
+function makeFakeStirlingPdf(): StirlingPdfProvider {
+  let nextId = 1000;
+  const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith('/api/v1/storage/files') && init?.method === 'POST') {
+      return new Response(JSON.stringify({ id: nextId++ }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response('not found', { status: 404 });
+  }) as unknown as typeof fetch;
+  return new StirlingPdfProvider({ url: 'http://stirling.test', apiKey: 'test-key', fetchImpl });
 }
 
 // A real, tiny (4x4) JPEG -- fake test fixture, never a real signature.
@@ -121,7 +135,7 @@ describe.skipIf(skipDb)('external document review: share links, comments, accept
 
   beforeAll(async () => {
     stack = await makeTestFiles();
-    ({ app, services } = buildFullApp(prisma, {}, { files: stack.files, scanner, emailProvider: mockProvider }));
+    ({ app, services } = buildFullApp(prisma, {}, { files: stack.files, scanner, emailProvider: mockProvider, stirlingPdf: makeFakeStirlingPdf() }));
 
     admin = await signIn(app, (await createTestUser(prisma, services, { role: 'ADMIN' })).email);
     sender = await signIn(app, (await createTestUser(prisma, services, { role: 'SENDER' })).email);
@@ -529,17 +543,23 @@ describe.skipIf(skipDb)('external document review: share links, comments, accept
       expect((await admin.get(`/documents/${r.documentId}`)).body.data.versions).toHaveLength(1);
     });
 
-    it('refuses with a plain reason when no signature is configured, and writes no version even though the text edit would have succeeded', async () => {
-      const r = await startRound('Acme Solar');
+    it('applies the accepted change with no signature stamped when none is configured -- the signature is optional', async () => {
+      const r = await startRound('No Signature Co');
       await admin.post(`/review-comments/${r.commentId}/accept`, {});
 
       // Temporarily take the only signature out of the running, then put it straight back for every other test.
       expect((await admin.post(`/signature-assets/${defaultSignatureId}/deactivate`)).status).toBe(200);
       try {
         const res = await admin.post(`/documents/${r.documentId}/review/incorporate-changes`, { shareLinkId: r.shareLinkId });
-        expect(res.status).toBe(409);
-        expect(res.body.error.message).toMatch(/no signature is configured/i);
-        expect((await admin.get(`/documents/${r.documentId}`)).body.data.versions).toHaveLength(1); // the text edit was never written either
+        expect(res.status, JSON.stringify(res.body)).toBe(200);
+        expect(res.body.data).toMatchObject({ versionNumber: 2, applied: 1 });
+
+        const doc = (await admin.get(`/documents/${r.documentId}`)).body.data;
+        expect(doc.versions[0]).toMatchObject({ isCurrent: true, versionNumber: 2, hasSignature: false });
+
+        const v2 = await prisma.documentVersion.findUniqueOrThrow({ where: { id: doc.versions[0].id } });
+        expect(v2.scanDetails).toMatchObject({ source: 'review_incorporate' });
+        expect((v2.scanDetails as Record<string, unknown>).signatureAssetId).toBeUndefined();
       } finally {
         // Re-activating does not restore isDefault on its own; set it again so the rest of the suite is unaffected.
         const reactivated = await request(app)
@@ -572,48 +592,141 @@ describe.skipIf(skipDb)('external document review: share links, comments, accept
     });
   });
 
-  describe('edit-text: staff editing the document directly, anywhere, no client or share link involved', () => {
-    it('writes every box as one new version, with the exact text staff typed', async () => {
-      const documentId = await createActiveDocument(uniq('Manual edit doc'));
-      const res = await admin.post(`/documents/${documentId}/review/edit-text`, {
-        edits: [
-          { pageNumber: 1, xPct: 0.1, yPct: 0.1, wPct: 0.3, hPct: 0.05, text: 'First Edit' },
-          { pageNumber: 1, xPct: 0.1, yPct: 0.3, wPct: 0.3, hPct: 0.05, text: 'Second Edit' },
-        ],
-      });
+  describe('stirling-pdf: hand the document off to a self-hosted Stirling-PDF instance', () => {
+    it('uploads the current version and returns a url to the file library', async () => {
+      const documentId = await createActiveDocument(uniq('Stirling doc'));
+      const res = await admin.post(`/documents/${documentId}/review/stirling-link`, {});
       expect(res.status, JSON.stringify(res.body)).toBe(200);
-      expect(res.body.data).toMatchObject({ versionNumber: 2, edited: 2 });
-
-      const doc = (await admin.get(`/documents/${documentId}`)).body.data;
-      expect(doc.versions).toHaveLength(2); // the original upload, plus exactly one new version for both edits together
-      const v2 = await prisma.documentVersion.findUniqueOrThrow({ where: { id: doc.versions[0].id } });
-      expect(v2.scanDetails).toMatchObject({ source: 'review_manual_edit', count: 2 });
-
-      const content = await admin
-        .get(`/documents/${documentId}/versions/${doc.versions[0].id}/content`)
-        .buffer(true)
-        .parse((r, cb) => {
-          const chunks: Buffer[] = [];
-          r.on('data', (x: Buffer) => chunks.push(x));
-          r.on('end', () => cb(null, Buffer.concat(chunks)));
-        });
-      expect(pdfContainsText(content.body as Buffer, 'First Edit')).toBe(true);
-      expect(pdfContainsText(content.body as Buffer, 'Second Edit')).toBe(true);
-    });
-
-    it('refuses a box that runs off the page, and refuses a page number the document does not have', async () => {
-      const documentId = await createActiveDocument(uniq('Manual edit doc'));
-      const offPage = await admin.post(`/documents/${documentId}/review/edit-text`, { edits: [{ pageNumber: 1, xPct: 0.9, yPct: 0.1, wPct: 0.3, hPct: 0.05, text: 'x' }] });
-      expect(offPage.status).toBe(400);
-
-      const badPage = await admin.post(`/documents/${documentId}/review/edit-text`, { edits: [{ pageNumber: 99, xPct: 0.1, yPct: 0.1, wPct: 0.3, hPct: 0.05, text: 'x' }] });
-      expect(badPage.status).toBe(409);
-      expect((await admin.get(`/documents/${documentId}`)).body.data.versions).toHaveLength(1); // nothing written
+      expect(res.body.data.url).toBe('http://stirling.test/files');
     });
 
     it('is off-limits to a role without documents:manage', async () => {
-      const documentId = await createActiveDocument(uniq('Manual edit doc'));
-      expect((await sender.post(`/documents/${documentId}/review/edit-text`, { edits: [{ pageNumber: 1, xPct: 0.1, yPct: 0.1, wPct: 0.3, hPct: 0.05, text: 'x' }] })).status).toBe(403);
+      const documentId = await createActiveDocument(uniq('Stirling doc'));
+      expect((await sender.post(`/documents/${documentId}/review/stirling-link`, {})).status).toBe(403);
+    });
+
+    it('503s when Stirling-PDF is not configured', async () => {
+      const unconfigured = buildFullApp(prisma, {}, { files: stack.files, scanner, emailProvider: mockProvider, stirlingPdf: new StirlingPdfProvider({ url: undefined, apiKey: undefined }) });
+      const unconfiguredAdmin = await signIn(unconfigured.app, (await createTestUser(prisma, unconfigured.services, { role: 'ADMIN' })).email);
+      const t = await unconfiguredAdmin.post('/document-types', { name: uniq('Unconfigured'), fields: [] });
+      const doc = await request(unconfigured.app)
+        .post('/api/v1/documents')
+        .set(unconfiguredAdmin.auth())
+        .field('typeId', t.body.data.id)
+        .field('name', uniq('Stirling not configured'))
+        .field('metadata', '{}')
+        .attach('file', makePdf(), { filename: 'doc.pdf', contentType: 'application/pdf' });
+      await unconfigured.services.jobs.drain();
+      await unconfiguredAdmin.post(`/documents/${doc.body.data.id}/activate`);
+
+      expect((await unconfiguredAdmin.post(`/documents/${doc.body.data.id}/review/stirling-link`, {})).status).toBe(503);
+    });
+  });
+
+  describe('send-modified-copy: email an uploaded file straight to the client, no new version', () => {
+    it('emails the uploaded file to the recipient and never creates a new version', async () => {
+      const documentId = await createActiveDocument(uniq('Ad hoc send doc'));
+      const res = await request(app)
+        .post(`/api/v1/documents/${documentId}/review/send-modified-copy`)
+        .set(admin.auth())
+        .field('recipientEmail', 'client@example.test')
+        .field('note', 'Filled in the two blanks you asked about')
+        .attach('file', makePdf({ body: 'BT /F1 12 Tf 72 720 Td (Ad Hoc Copy) Tj ET' }), { filename: 'modified.pdf', contentType: 'application/pdf' });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+      expect((await admin.get(`/documents/${documentId}`)).body.data.versions).toHaveLength(1); // untouched
+
+      const sent = mockProvider.sentMessages.at(-1)!;
+      expect(sent).toBeDefined();
+      const raw = sent.raw.toString('utf8');
+      expect(raw).toContain('client@example.test');
+      expect(raw).toContain('modified.pdf');
+    });
+
+    it('refuses a file that is not a PDF', async () => {
+      const documentId = await createActiveDocument(uniq('Ad hoc send doc'));
+      const res = await request(app)
+        .post(`/api/v1/documents/${documentId}/review/send-modified-copy`)
+        .set(admin.auth())
+        .field('recipientEmail', 'client@example.test')
+        .attach('file', Buffer.from('not a pdf'), { filename: 'modified.pdf', contentType: 'application/pdf' });
+      expect(res.status).toBe(400);
+    });
+
+    it('refuses an invalid recipient address', async () => {
+      const documentId = await createActiveDocument(uniq('Ad hoc send doc'));
+      const res = await request(app)
+        .post(`/api/v1/documents/${documentId}/review/send-modified-copy`)
+        .set(admin.auth())
+        .field('recipientEmail', 'not-an-email')
+        .attach('file', makePdf(), { filename: 'modified.pdf', contentType: 'application/pdf' });
+      expect(res.status).toBe(400);
+    });
+
+    it('is off-limits to a role without email:send_external', async () => {
+      const documentId = await createActiveDocument(uniq('Ad hoc send doc'));
+      const viewer = await signIn(app, (await createTestUser(prisma, services, { role: 'VIEWER' })).email);
+      const res = await request(app)
+        .post(`/api/v1/documents/${documentId}/review/send-modified-copy`)
+        .set(viewer.auth())
+        .field('recipientEmail', 'client@example.test')
+        .attach('file', makePdf(), { filename: 'modified.pdf', contentType: 'application/pdf' });
+      expect(res.status).toBe(403);
+    });
+  });
+
+  describe('comments/batch: queuing several suggested changes/comments and sending them together', () => {
+    it('creates every item in one call and queues exactly one notify job for the whole batch', async () => {
+      const documentId = await createActiveDocument(uniq('Batch doc'));
+      const link = await createLink(documentId);
+      const token = await extractToken(link.body.data.id);
+      await drain(); // flush the initial "please review" send before counting notification messages below
+
+      const res = await publicPost(`/public/review/${token}/comments/batch`, {
+        items: [
+          { pageNumber: 1, xPct: 0.1, yPct: 0.1, body: 'First note' },
+          { kind: 'CHANGE', pageNumber: 1, xPct: 0.1, yPct: 0.3, boxWPct: 0.3, boxHPct: 0.04, originalText: 'Party B', replacementText: 'Acme Solar Pvt Ltd' },
+        ],
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(res.body.data).toHaveLength(2);
+      const ids = res.body.data.map((c: any) => c.id as string);
+
+      const linkRow = await prisma.documentShareLink.findUniqueOrThrow({ where: { id: link.body.data.id } });
+      expect(linkRow.status).toBe('COMMENTED');
+
+      mockProvider.sentMessages = [];
+      await drain();
+
+      // Both comments share the one notification -- never one email per item.
+      for (const id of ids) {
+        const notified = await prisma.auditLog.findFirstOrThrow({ where: { action: 'REVIEW_COMMENT_NOTIFIED', resourceId: id } });
+        expect(notified.outcome).toBe('SUCCESS');
+      }
+      expect(mockProvider.sentMessages).toHaveLength(1);
+      expect(mockProvider.sentMessages[0]!.raw.toString('utf8')).toContain('2 new review comments');
+    });
+
+    it('refuses an empty batch', async () => {
+      const documentId = await createActiveDocument(uniq('Batch doc'));
+      const link = await createLink(documentId);
+      const token = await extractToken(link.body.data.id);
+      const res = await publicPost(`/public/review/${token}/comments/batch`, { items: [] });
+      expect(res.status).toBe(400);
+    });
+
+    it('writes nothing when one item in the batch is invalid -- all or nothing', async () => {
+      const documentId = await createActiveDocument(uniq('Batch doc'));
+      const link = await createLink(documentId);
+      const token = await extractToken(link.body.data.id);
+      const res = await publicPost(`/public/review/${token}/comments/batch`, {
+        items: [
+          { pageNumber: 1, xPct: 0.1, yPct: 0.1, body: 'Fine on its own' },
+          { kind: 'CHANGE', pageNumber: 1, xPct: 0.1, yPct: 0.1, replacementText: 'x' }, // missing the box
+        ],
+      });
+      expect(res.status).toBe(400);
+      expect((await admin.get(`/documents/${documentId}/review-comments`)).body.data).toHaveLength(0);
     });
   });
 

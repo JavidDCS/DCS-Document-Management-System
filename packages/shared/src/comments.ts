@@ -51,6 +51,11 @@ export const createReviewCommentSchema = pinPositionSchema
   });
 export type CreateReviewCommentInput = z.output<typeof createReviewCommentSchema>;
 
+/** Queuing several suggested changes/comments on the client's own device and sending them all at once --
+ * so the team gets one notification covering everything, not one email per item. */
+export const createReviewCommentsBatchSchema = z.strictObject({ items: z.array(createReviewCommentSchema).min(1).max(20) });
+export type CreateReviewCommentsBatchInput = z.output<typeof createReviewCommentsBatchSchema>;
+
 export const reviewCommentDecisionSchema = z.strictObject({
   resolutionNote: z.string().trim().max(500).optional(),
   /** Accept only: staff's own wording, used instead of the client's `replacementText` when the PDF is written.
@@ -88,20 +93,6 @@ export type StampSignatureInput = z.output<typeof stampSignatureSchema>;
 /** The one-button combined step: applies every accepted change and stamps the signature as a single new version. */
 export const incorporateChangesSchema = z.strictObject({ shareLinkId: z.uuid(), signatureAssetId: z.uuid().optional() });
 export type IncorporateChangesInput = z.output<typeof incorporateChangesSchema>;
-
-/** One staff-drawn box, anywhere on the document, with the text to put there -- same shape as a client's
- * suggested CHANGE, but not tied to any share link or client comment at all. */
-export const manualTextEditSchema = pinPositionSchema.extend({
-  wPct: z.number().gt(0).max(1),
-  hPct: z.number().gt(0).max(1),
-  text: z.string().trim().min(1).max(MAX_CHANGE_TEXT),
-}).refine((v) => v.xPct + v.wPct <= 1.000001, { message: 'The box runs off the right edge of the page', path: ['wPct'] })
-  .refine((v) => v.yPct + v.hPct <= 1.000001, { message: 'The box runs off the bottom edge of the page', path: ['hPct'] });
-export type ManualTextEdit = z.output<typeof manualTextEditSchema>;
-
-/** Staff editing the current version directly -- any number of spots in one go, written as a single new version. */
-export const editDocumentTextSchema = z.strictObject({ edits: z.array(manualTextEditSchema).min(1).max(20) });
-export type EditDocumentTextInput = z.output<typeof editDocumentTextSchema>;
 
 export interface ReviewCommentDto {
   id: string;

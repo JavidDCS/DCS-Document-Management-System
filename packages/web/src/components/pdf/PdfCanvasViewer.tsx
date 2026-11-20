@@ -74,6 +74,14 @@ export function PdfCanvasViewer({ fileUrl, comments, onPlacePin, onPlaceBox, pen
 
   const interactive = Boolean(onPlacePin || onPlaceBox);
 
+  // Selecting a comment from the list jumps the page to wherever it actually is -- otherwise picking one on a
+  // page you're not currently viewing looks like nothing happened.
+  useEffect(() => {
+    if (!selectedCommentId) return;
+    const c = comments.find((x) => x.id === selectedCommentId);
+    if (c) setPage(c.pageNumber);
+  }, [selectedCommentId, comments]);
+
   useEffect(() => {
     let alive = true;
     setLoading(true);
@@ -166,7 +174,9 @@ export function PdfCanvasViewer({ fileUrl, comments, onPlacePin, onPlaceBox, pen
     [drag, onPlaceBox, onPlacePin, page]
   );
 
-  const marksOnPage = comments.filter((c) => c.pageNumber === page);
+  // With one comment selected, show only that mark -- a page full of other boxes made it hard to tell exactly
+  // what the client asked to change.
+  const marksOnPage = comments.filter((c) => c.pageNumber === page && (!selectedCommentId || c.id === selectedCommentId));
   const pendingOnPage = pending && pending.pageNumber === page ? pending : null;
   const liveBox = drag && Math.hypot(drag.ex - drag.sx, drag.ey - drag.sy) >= 6 && size.width > 0 ? dragToSelection(drag.sx, drag.sy, drag.ex, drag.ey, size.width, size.height) : null;
 

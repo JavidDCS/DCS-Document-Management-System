@@ -438,6 +438,45 @@ export class EmailService {
     return this.get(actor, id);
   }
 
+  /**
+   * Sends an uploaded file straight to one recipient, with no DocumentVersion, no EmailMessage/attachment row,
+   * and no Sent History entry -- a quick "here's a modified copy" email that deliberately never touches the
+   * document's own version history. Sent immediately (synchronously), since there is nothing persisted to retry
+   * against if it fails; the caller sees the real error right away instead of a queued, eventually-failed job.
+   */
+  async sendModifiedCopy(actor: AuthContext, input: { documentId: string; recipientEmail: string; filename: string; content: Buffer; subject: string; body: string }, meta: RequestMeta): Promise<void> {
+    const external = !input.recipientEmail.endsWith(`@${this.cfg.ALLOWED_EMAIL_DOMAIN}`);
+    if (external && !actor.permissions.includes('email:send_external')) throw new HttpError(403, 'You may only send to internal addresses', 'FORBIDDEN');
+    const allowlist = this.cfg.EMAIL_TEST_MODE_ALLOWLIST;
+    if (allowlist && !allowlist.includes(input.recipientEmail)) throw new HttpError(403, `Test mode is on: mail can only go to ${allowlist.join(', ')}`, 'FORBIDDEN');
+    if (input.content.length > this.cfg.EMAIL_MAX_ATTACHMENT_TOTAL_MB * 1024 * 1024) {
+      throw new HttpError(413, `The file is larger than ${this.cfg.EMAIL_MAX_ATTACHMENT_TOTAL_MB} MB`, 'PAYLOAD_TOO_LARGE');
+    }
+
+    const status = await this.connections.status(actor.userId, actor.email);
+    if (status.status !== 'ACTIVE') throw new HttpError(409, 'Connect your Gmail account before sending', 'CONFLICT');
+
+    const raw = await buildMime({
+      fromName: actor.name, fromAddress: actor.email, to: [input.recipientEmail], cc: [], bcc: [],
+      subject: input.subject, body: input.body, messageId: randomUUID(),
+      attachments: [{ filename: input.filename, content: input.content }],
+    });
+
+    try {
+      const access = await this.connections.accessToken(actor.userId);
+      await this.provider.send(access.token, raw);
+    } catch (err) {
+      if (err instanceof EmailProviderError) {
+        if (err.kind === 'AUTH_REVOKED') throw new HttpError(409, 'Your Gmail connection needs to be reconnected', 'CONFLICT');
+        if (err.kind === 'RATE_LIMITED') throw new HttpError(429, 'Gmail sending limit reached; try again shortly', 'RATE_LIMITED');
+        throw new HttpError(502, 'Gmail did not confirm the message was sent', 'INTERNAL_ERROR');
+      }
+      throw err;
+    }
+
+    await this.audit(this.db, actor, 'MODIFIED_COPY_SENT', 'document', input.documentId, meta, { recipientEmail: input.recipientEmail, filename: input.filename, sizeBytes: input.content.length });
+  }
+
   searchTemplates(search: string) {
     return this.db.emailTemplate.findMany({ where: { name: { contains: likeEscape(search), mode: 'insensitive' } }, take: 20 });
   }

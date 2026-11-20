@@ -7,10 +7,9 @@ import { toast } from 'sonner';
 import { api, ApiError, errorMessage, fieldErrors } from '../api';
 import { useAuth } from '../auth/AuthContext';
 import { CommentsReviewPanel } from '../components/CommentsReviewPanel';
-import { DocumentEditPanel } from '../components/DocumentEditPanel';
-import { FilePicker, ProgressBar } from '../components/FilePicker';
 import { MetadataForm } from '../components/MetadataForm';
 import { TagPicker } from '../components/TagPicker';
+import { UploadVersion } from '../components/UploadVersion';
 import { ActionMenu, Badge, ConfirmDialog, CopyButton, Empty, ErrorBanner, InfoBanner, Modal, SkeletonList, Spinner, Tabs, cn } from '../components/ui';
 import { useLoad, usePolling, useTitle } from '../hooks';
 import { fmtDateTime, fmtSize, saveBlob } from '../lib/format';
@@ -22,7 +21,7 @@ const scanText: Record<ScanStatus, string> = { PENDING: 'Scanning…', CLEAN: 'C
 const scanIcon = { PENDING: Clock, CLEAN: ShieldCheck, QUARANTINED: ShieldAlert, REJECTED: ShieldX } as const;
 const scanColour = { PENDING: 'bg-info/10 text-info', CLEAN: 'bg-success/10 text-success', QUARANTINED: 'bg-danger/10 text-danger', REJECTED: 'bg-danger/10 text-danger' } as const;
 
-type TabId = 'overview' | 'versions' | 'access' | 'comments' | 'edit';
+type TabId = 'overview' | 'versions' | 'access' | 'comments';
 
 export function DocumentDetailPage() {
   const { id = '' } = useParams();
@@ -69,7 +68,6 @@ export function DocumentDetailPage() {
     { id: 'versions', label: `Versions (${d.versions.length})` },
     ...(manage ? [{ id: 'access' as const, label: 'Access' }] : []),
     ...(canReview ? [{ id: 'comments' as const, label: 'Client comments' }] : []),
-    ...(manage ? [{ id: 'edit' as const, label: 'Edit document' }] : []),
   ];
 
   return (
@@ -205,9 +203,8 @@ export function DocumentDetailPage() {
 
       {tab === 'access' && manage && <AccessTab docId={d.id} />}
 
-      {tab === 'comments' && canReview && <CommentsReviewPanel doc={d} onDocumentChanged={doc.reload} />}
+      {tab === 'comments' && canReview && <CommentsReviewPanel doc={d} />}
 
-      {tab === 'edit' && manage && <DocumentEditPanel doc={d} onDocumentChanged={doc.reload} />}
 
       {preview && <PreviewModal doc={d} version={preview} onClose={() => setPreview(null)} />}
       {dialog?.kind === 'promote' && dialog.version && (
@@ -303,39 +300,6 @@ function EditForm({ doc, allTags, onCancel, onSaved }: { doc: DocumentDetail; al
         <button className="btn" onClick={onCancel} disabled={busy}>Cancel</button>
         <button className="btn primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save changes'}</button>
       </div>
-    </div>
-  );
-}
-
-function UploadVersion({ doc, onDone }: { doc: DocumentDetail; onDone: () => void }) {
-  const [file, setFile] = useState<File | null>(null);
-  const [note, setNote] = useState('');
-  const [progress, setProgress] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function go() {
-    if (!file) return;
-    const form = new FormData();
-    form.append('file', file, file.name);
-    if (note.trim()) form.append('changeNote', note.trim());
-    setProgress(0);
-    setError(null);
-    try {
-      await api.upload(`/documents/${doc.id}/versions`, form, setProgress);
-      onDone();
-    } catch (e) {
-      setProgress(null);
-      setError(errorMessage(e));
-    }
-  }
-
-  return (
-    <div className="stack mb-5 rounded-xl border bg-muted/30 p-4">
-      {error && <ErrorBanner message={error} />}
-      <FilePicker file={file} onPick={setFile} maxMb={doc.type.maxFileSizeMb} />
-      <label className="field"><span>Note about this version (optional)</span><input value={note} onChange={(e) => setNote(e.target.value)} maxLength={500} /></label>
-      {progress !== null && <ProgressBar value={progress} label="Upload progress" />}
-      <div className="row end"><button className="btn primary" disabled={!file || progress !== null} onClick={go}><Upload className="size-4" />Upload version</button></div>
     </div>
   );
 }

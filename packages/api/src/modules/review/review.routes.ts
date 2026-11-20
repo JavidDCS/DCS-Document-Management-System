@@ -2,8 +2,8 @@ import { z } from 'zod';
 import {
   applyReviewChangesSchema,
   createReviewCommentSchema,
+  createReviewCommentsBatchSchema,
   createShareLinkSchema,
-  editDocumentTextSchema,
   incorporateChangesSchema,
   reviewCommentDecisionSchema,
   stampSignatureSchema,
@@ -12,10 +12,17 @@ import {
 import type { AppContext } from '../../app.js';
 import { can, PUBLIC, type SecureRouter } from '../../platform/auth/secureRouter.js';
 import { asyncHandler } from '../../platform/http/errorHandler.js';
+import { HttpError } from '../../utils/httpError.js';
 import { validate } from '../../platform/http/validateRequest.js';
 import { auditContext } from '../audit/index.js';
 import { contentDisposition } from '../documents/documents.routes.js';
+import { parseAdHocPdfUpload } from './adHocPdfUpload.js';
 import type { ReviewService } from './review.service.js';
+
+const sendModifiedCopyFieldsSchema = z.strictObject({
+  recipientEmail: z.string().trim().toLowerCase().pipe(z.email().max(254)),
+  note: z.string().trim().max(500).optional(),
+});
 
 const commentParamSchema = z.strictObject({ commentId: z.uuid() });
 // Raw tokens are generateRefreshToken() output: base64url, 64 characters. A loose length/charset check rejects
@@ -95,12 +102,27 @@ export function registerReviewRoutes(secure: SecureRouter, ctx: AppContext, revi
   );
 
   secure.post(
-    '/documents/:id/review/edit-text',
-    can('documents:manage', { reauth: true }),
-    validate({ params: uuidParamSchema, body: editDocumentTextSchema }),
+    '/documents/:id/review/stirling-link',
+    can('documents:manage'),
+    idParam,
     asyncHandler(async (req, res) => {
       const { id } = req.params as unknown as z.infer<typeof uuidParamSchema>;
-      res.json({ data: await review.editDocumentText(req.auth!, id, req.body as z.infer<typeof editDocumentTextSchema>, auditContext(req)) });
+      res.json({ data: await review.createStirlingPdfLink(req.auth!, id, auditContext(req)) });
+    })
+  );
+
+  secure.post(
+    '/documents/:id/review/send-modified-copy',
+    can('email:send_external'),
+    limiters.send,
+    idParam,
+    asyncHandler(async (req, res) => {
+      const { id } = req.params as unknown as z.infer<typeof uuidParamSchema>;
+      const upload = await parseAdHocPdfUpload(req, { maxBytes: review.maxUploadBytes });
+      const parsed = sendModifiedCopyFieldsSchema.safeParse(upload.fields);
+      if (!parsed.success) throw new HttpError(400, 'Invalid request', 'VALIDATION_ERROR', parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })));
+      await review.sendModifiedCopy(req.auth!, id, { filename: upload.file!.filename, content: upload.file!.content, recipientEmail: parsed.data.recipientEmail, note: parsed.data.note }, auditContext(req));
+      res.status(200).json({ data: { sent: true } });
     })
   );
 
@@ -167,6 +189,19 @@ export function registerReviewRoutes(secure: SecureRouter, ctx: AppContext, revi
     asyncHandler(async (req, res) => {
       const { token } = req.params as unknown as z.infer<typeof tokenParamSchema>;
       const created = await review.submitComment(token, req.body as z.infer<typeof createReviewCommentSchema>, auditContext(req));
+      res.status(201).json({ data: created });
+    })
+  );
+
+  secure.post(
+    '/public/review/:token/comments/batch',
+    PUBLIC('possession of the random token is the only credential, like a password-reset link'),
+    limiters.publicComment,
+    validate({ params: tokenParamSchema, body: createReviewCommentsBatchSchema }),
+    asyncHandler(async (req, res) => {
+      const { token } = req.params as unknown as z.infer<typeof tokenParamSchema>;
+      const { items } = req.body as z.infer<typeof createReviewCommentsBatchSchema>;
+      const created = await review.submitComments(token, items, auditContext(req));
       res.status(201).json({ data: created });
     })
   );

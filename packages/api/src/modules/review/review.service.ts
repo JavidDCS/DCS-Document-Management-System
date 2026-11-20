@@ -8,7 +8,6 @@ import {
   type CreateReviewCommentInput,
   type CreateShareLinkInput,
   type DraftInput,
-  type EditDocumentTextInput,
   type PublicReviewLinkInfo,
   type ReviewCommentDto,
   type ReviewCommentKind,
@@ -38,6 +37,7 @@ import { toRoles } from '../identity/auth.service.js';
 import { generateRefreshToken, hashToken } from '../identity/tokens.js';
 import { enqueueJob, type JobContext } from '../jobs/jobs.js';
 import type { FileService } from '../storage/fileService.js';
+import type { StirlingPdfProvider } from '../../providers/pdf/stirlingPdf.js';
 import { applyReplacements, pageCount, stamp, UnsupportedTextError } from './pdfStamp.service.js';
 
 export interface RequestMeta {
@@ -61,9 +61,6 @@ const MAX_COMMENTS_PER_LINK = 100;
 const SOURCE_APPLY = REVIEW_SOURCE_APPLY;
 const SOURCE_SIGNATURE = REVIEW_SOURCE_SIGNATURE;
 const SOURCE_INCORPORATE = REVIEW_SOURCE_INCORPORATE;
-/** Staff editing the document directly, not tied to any client comment or share link at all. */
-const SOURCE_MANUAL_EDIT = 'review_manual_edit';
-
 const DEFAULT_SIGNING_SUBJECT = 'Please review and sign: {{document_name}}';
 const DEFAULT_SIGNING_BODY = [
   'Hello {{recipient_name}},',
@@ -140,10 +137,15 @@ export class ReviewService {
     private readonly docs: DocumentsService,
     private readonly email: EmailService,
     private readonly connections: EmailConnectionsService,
+    private readonly stirlingPdf: StirlingPdfProvider,
     cfg: ReviewConfig
   ) {
     this.publicUrl = cfg.APP_PUBLIC_URL.replace(/\/+$/, '');
     this.maxBytes = cfg.STORAGE_MAX_FILE_SIZE_MB * 1024 * 1024;
+  }
+
+  get maxUploadBytes() {
+    return this.maxBytes;
   }
 
   // ------------------------------------------------------------------ mapping
@@ -527,11 +529,12 @@ export class ReviewService {
   }
 
   /**
-   * The one-button combined step: applies every ACCEPTED, not-yet-applied suggested change AND stamps the
-   * signature, as a SINGLE new version (not two, the way applyChanges + stampSignature separately produce).
-   * Everything happens in memory before anything is written, so a failure at any point (an unsupported
-   * character in a replacement, a signature page out of range, no signature configured) leaves the document
-   * exactly as it was -- never a half-applied version with changes but no signature, or vice versa.
+   * The one-button combined step: applies every ACCEPTED, not-yet-applied suggested change as a SINGLE new
+   * version, and stamps the configured signature onto it too if one is set up. The signature is optional --
+   * staff who add a signature or stamp themselves another way (e.g. in Stirling-PDF) can incorporate the text
+   * changes with none configured at all. Everything happens in memory before anything is written, so a failure
+   * at any point (an unsupported character in a replacement, a signature page out of range) leaves the document
+   * exactly as it was -- never a half-applied version.
    */
   async incorporateChanges(actor: AuthContext, documentId: string, input: { shareLinkId: string; signatureAssetId?: string | undefined }, meta: RequestMeta): Promise<{ versionId: string; versionNumber: number; applied: number }> {
     const link = await this.db.documentShareLink.findFirst({ where: { id: input.shareLinkId, documentId } });
@@ -546,10 +549,11 @@ export class ReviewService {
     });
     if (pending.length === 0) throw new HttpError(409, 'There are no accepted changes waiting to be incorporated', 'CONFLICT');
 
+    // No signature configured is fine -- it just means nothing gets stamped here.
     const signature = input.signatureAssetId
       ? await this.db.signatureAsset.findFirst({ where: { id: input.signatureAssetId, isActive: true } })
       : await this.db.signatureAsset.findFirst({ where: { isDefault: true, isActive: true } });
-    if (!signature) throw new HttpError(409, 'No signature is configured; upload one and mark it as the default signature asset', 'CONFLICT');
+    if (input.signatureAssetId && !signature) throw new HttpError(404, 'Signature not found', 'NOT_FOUND');
 
     const base = await this.loadCurrentVersion(documentId);
     this.assertDerivedFromReviewed(base, link.versionId);
@@ -569,26 +573,29 @@ export class ReviewService {
       throw err;
     }
 
-    const sigBytes = await this.files.readVerified(
-      'clean', signature.storageKey,
-      { keyId: signature.encryptionKeyId, wrappedKey: Buffer.from(signature.wrappedDataKey) },
-      { sha256: signature.sha256, size: Number(signature.sizeBytes) },
-      10 * 1024 * 1024
-    );
-    const pages = await pageCount(edited);
-    if (signature.pageNumber > pages) {
-      throw new HttpError(409, `The signature's page (${signature.pageNumber}) is beyond this document's ${pages} page(s)`, 'CONFLICT');
+    let finalBytes = edited;
+    if (signature) {
+      const sigBytes = await this.files.readVerified(
+        'clean', signature.storageKey,
+        { keyId: signature.encryptionKeyId, wrappedKey: Buffer.from(signature.wrappedDataKey) },
+        { sha256: signature.sha256, size: Number(signature.sizeBytes) },
+        10 * 1024 * 1024
+      );
+      const pages = await pageCount(edited);
+      if (signature.pageNumber > pages) {
+        throw new HttpError(409, `The signature's page (${signature.pageNumber}) is beyond this document's ${pages} page(s)`, 'CONFLICT');
+      }
+      // Stamped last, on the already-edited bytes -- the signature always sits on top of the final text, never under it.
+      finalBytes = await stamp({ pdfBytes: edited, signature: { bytes: sigBytes, pageNumber: signature.pageNumber, xPt: signature.xPt, yPt: signature.yPt, widthPt: signature.widthPt, heightPt: signature.heightPt } });
     }
-    // Stamped last, on the already-edited bytes -- the signature always sits on top of the final text, never under it.
-    const stamped = await stamp({ pdfBytes: edited, signature: { bytes: sigBytes, pageNumber: signature.pageNumber, xPt: signature.xPt, yPt: signature.yPt, widthPt: signature.widthPt, heightPt: signature.heightPt } });
 
     const ids = pending.map((c) => c.id);
     const done = await this.commitDerivedVersion({
-      actor, documentId, base, bytes: stamped, meta,
-      changeNote: `Incorporated ${ids.length} accepted change${ids.length === 1 ? '' : 's'} and added the signature`,
-      scanDetails: { source: SOURCE_INCORPORATE, shareLinkId: link.id, commentIds: ids, signatureAssetId: signature.id },
+      actor, documentId, base, bytes: finalBytes, meta,
+      changeNote: `Incorporated ${ids.length} accepted change${ids.length === 1 ? '' : 's'}${signature ? ' and added the signature' : ''}`,
+      scanDetails: { source: SOURCE_INCORPORATE, shareLinkId: link.id, commentIds: ids, ...(signature ? { signatureAssetId: signature.id } : {}) },
       auditAction: 'REVIEW_CHANGES_INCORPORATED',
-      auditDetails: { shareLinkId: link.id, commentIds: ids, signatureAssetId: signature.id },
+      auditDetails: { shareLinkId: link.id, commentIds: ids, ...(signature ? { signatureAssetId: signature.id } : {}) },
       after: async (tx, versionId) => {
         await tx.documentReviewComment.updateMany({ where: { id: { in: ids } }, data: { resultingVersionId: versionId } });
       },
@@ -597,37 +604,41 @@ export class ReviewService {
   }
 
   /**
-   * Staff editing the current version directly, anywhere on the page -- not tied to any client comment or share
-   * link. Reuses the exact same whiteout-and-redraw engine as applyChanges/incorporateChanges, just with
-   * staff-drawn boxes instead of a client's. All edits are written as ONE new version; a failure partway (an
-   * unsupported character, a box off the page) leaves the document exactly as it was.
+   * Emails an uploaded file straight to one client address, with no new DocumentVersion and no change to the
+   * document's current version -- for sending a small, ad-hoc modified copy (e.g. a couple of filled-in blanks)
+   * without that becoming part of the document's own version history.
    */
-  async editDocumentText(actor: AuthContext, documentId: string, input: EditDocumentTextInput, meta: RequestMeta): Promise<{ versionId: string; versionNumber: number; edited: number }> {
+  async sendModifiedCopy(actor: AuthContext, documentId: string, input: { filename: string; content: Buffer; recipientEmail: string; note?: string | undefined }, meta: RequestMeta): Promise<void> {
+    const doc = await this.db.document.findUnique({ where: { id: documentId }, select: { name: true } });
+    if (!doc) throw new HttpError(404, 'Document not found');
+    const subject = `Modified document: ${doc.name}`;
+    const body = [`Hello,`, '', `Please find the modified "${doc.name}" attached.`, ...(input.note ? ['', input.note] : [])].join('\n');
+    await this.email.sendModifiedCopy(actor, { documentId, recipientEmail: input.recipientEmail, filename: input.filename, content: input.content, subject, body }, meta);
+  }
+
+  /**
+   * Pushes the current version into a self-hosted Stirling-PDF instance's own storage, so staff find it waiting
+   * there (newest row in the file library) instead of downloading it first and uploading it back by hand.
+   * Stirling-PDF's own editor has no webhook or API-visible "save" (confirmed: its Save/Download actions never
+   * call back to its own storage endpoints), so there is no way to pull an edit back automatically -- staff still
+   * finish by downloading the result there and using "Upload new version" here, same as any other external edit.
+   * Entirely optional: 503 if STIRLING_PDF_URL/STIRLING_PDF_API_KEY are not set.
+   */
+  async createStirlingPdfLink(actor: AuthContext, documentId: string, meta: RequestMeta): Promise<{ url: string }> {
+    if (!this.stirlingPdf.available) throw new HttpError(503, 'Stirling-PDF is not configured', 'INTERNAL_ERROR');
     const base = await this.loadCurrentVersion(documentId);
     const pdfBytes = await this.readVersionBytes(base);
-    const pages = await pageCount(pdfBytes);
-    for (const e of input.edits) {
-      if (e.pageNumber > pages) throw new HttpError(409, `Page ${e.pageNumber} does not exist in this document (it has ${pages} page(s))`, 'CONFLICT');
-    }
-
-    let edited: Buffer;
+    let url: string;
     try {
-      edited = await applyReplacements(pdfBytes, input.edits.map((e) => ({ pageNumber: e.pageNumber, xPct: e.xPct, yPct: e.yPct, wPct: e.wPct, hPct: e.hPct, text: e.text })));
+      url = (await this.stirlingPdf.createEditorLink(pdfBytes, base.originalFilename)).url;
     } catch (err) {
-      if (err instanceof UnsupportedTextError) {
-        throw new HttpError(400, `${err.message}. Use plain letters and numbers.`, 'VALIDATION_ERROR');
-      }
-      throw err;
+      throw new HttpError(502, err instanceof Error ? err.message : 'Stirling-PDF request failed', 'INTERNAL_ERROR');
     }
-
-    const done = await this.commitDerivedVersion({
-      actor, documentId, base, bytes: edited, meta,
-      changeNote: `Manually edited ${input.edits.length} spot${input.edits.length === 1 ? '' : 's'}`,
-      scanDetails: { source: SOURCE_MANUAL_EDIT, count: input.edits.length },
-      auditAction: 'DOCUMENT_TEXT_EDITED',
-      auditDetails: { count: input.edits.length },
+    await recordAudit(this.db, {
+      actorType: 'USER', actorUserId: actor.userId, action: 'STIRLING_PDF_LINK_CREATED', resourceType: 'document', resourceId: documentId,
+      ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { versionId: base.id },
     });
-    return { ...done, edited: input.edits.length };
+    return { url };
   }
 
   // ------------------------------------------------------------------ public, unauthenticated routes
@@ -689,6 +700,26 @@ export class ReviewService {
     return { data, filename: v.originalFilename, sha256: v.sha256 };
   }
 
+  private commentCreateData(shareLinkId: string, input: CreateReviewCommentInput, meta: RequestMeta) {
+    const isChange = input.kind === 'CHANGE';
+    // A suggested change needs no separate note: the "from -> to" line IS the comment staff read in the list and the email.
+    const body = input.body || `Change ${input.originalText ? `"${input.originalText}" ` : ''}to "${input.replacementText ?? ''}"`;
+    return {
+      shareLinkId,
+      kind: input.kind,
+      pageNumber: input.pageNumber,
+      xPct: input.xPct,
+      yPct: input.yPct,
+      boxWPct: isChange ? (input.boxWPct ?? null) : null,
+      boxHPct: isChange ? (input.boxHPct ?? null) : null,
+      originalText: isChange ? (input.originalText || null) : null,
+      replacementText: isChange ? (input.replacementText ?? null) : null,
+      body,
+      clientIp: meta.ip,
+      userAgent: meta.userAgent,
+    };
+  }
+
   async submitComment(token: string, input: CreateReviewCommentInput, meta: RequestMeta): Promise<ReviewCommentDto> {
     const link = await this.loadActiveLinkByToken(token);
     const existing = await this.db.documentReviewComment.count({ where: { shareLinkId: link.id } });
@@ -696,28 +727,8 @@ export class ReviewService {
       throw new HttpError(409, 'This review link has reached its limit of comments. Please contact the sender.', 'CONFLICT');
     }
 
-    const isChange = input.kind === 'CHANGE';
-    // A suggested change needs no separate note: the "from -> to" line IS the comment staff read in the list and the email.
-    const body = input.body || `Change ${input.originalText ? `"${input.originalText}" ` : ''}to "${input.replacementText ?? ''}"`;
-
     const created = await this.db.$transaction(async (tx) => {
-      const c = await tx.documentReviewComment.create({
-        data: {
-          shareLinkId: link.id,
-          kind: input.kind,
-          pageNumber: input.pageNumber,
-          xPct: input.xPct,
-          yPct: input.yPct,
-          boxWPct: isChange ? (input.boxWPct ?? null) : null,
-          boxHPct: isChange ? (input.boxHPct ?? null) : null,
-          originalText: isChange ? (input.originalText || null) : null,
-          replacementText: isChange ? (input.replacementText ?? null) : null,
-          body,
-          clientIp: meta.ip,
-          userAgent: meta.userAgent,
-        },
-        include: { resolvedBy: { select: { id: true, name: true } } },
-      });
+      const c = await tx.documentReviewComment.create({ data: this.commentCreateData(link.id, input, meta), include: { resolvedBy: { select: { id: true, name: true } } } });
       if (link.status !== 'COMMENTED') await tx.documentShareLink.update({ where: { id: link.id }, data: { status: 'COMMENTED' } });
       await recordAudit(tx, {
         actorType: 'EXTERNAL', action: 'REVIEW_COMMENT_SUBMITTED', resourceType: 'document_review_comment', resourceId: c.id,
@@ -729,39 +740,76 @@ export class ReviewService {
     return this.toCommentDto(created);
   }
 
+  /**
+   * Queues several comments/suggested changes as ONE submission: all rows are created together and exactly one
+   * notify job fires for the whole batch, so the team gets a single email covering everything the client just
+   * added, instead of one email per item.
+   */
+  async submitComments(token: string, items: readonly CreateReviewCommentInput[], meta: RequestMeta): Promise<ReviewCommentDto[]> {
+    const link = await this.loadActiveLinkByToken(token);
+    const existing = await this.db.documentReviewComment.count({ where: { shareLinkId: link.id } });
+    if (existing + items.length > MAX_COMMENTS_PER_LINK) {
+      throw new HttpError(409, 'This review link has reached its limit of comments. Please contact the sender.', 'CONFLICT');
+    }
+
+    const created = await this.db.$transaction(async (tx) => {
+      const rows: CommentRow[] = [];
+      for (const input of items) {
+        const c = await tx.documentReviewComment.create({ data: this.commentCreateData(link.id, input, meta), include: { resolvedBy: { select: { id: true, name: true } } } });
+        rows.push(c);
+        await recordAudit(tx, {
+          actorType: 'EXTERNAL', action: 'REVIEW_COMMENT_SUBMITTED', resourceType: 'document_review_comment', resourceId: c.id,
+          ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { shareLinkId: link.id, documentId: link.documentId, kind: input.kind },
+        });
+      }
+      if (link.status !== 'COMMENTED') await tx.documentShareLink.update({ where: { id: link.id }, data: { status: 'COMMENTED' } });
+      const ids = rows.map((r) => r.id);
+      await enqueueJob(tx, { type: 'notify_review_comment', payload: { commentIds: ids }, dedupeKey: `notify-review-comments:${ids.join(',')}` });
+      return rows;
+    });
+    return created.map((c) => this.toCommentDto(c));
+  }
+
   // ------------------------------------------------------------------ background job: notify the review team
 
   /**
-   * Fires after a comment is submitted. Sent through the share link's creator's own connected Gmail, to every
-   * ACTIVE user holding `documents:review` -- never attaching the PDF. Idempotent: a retried job that already
-   * recorded an outcome for this comment is a no-op.
+   * Fires after one or more comments are submitted together. Sent through the share link's creator's own
+   * connected Gmail, to every ACTIVE user holding `documents:review` -- never attaching the PDF. One email per
+   * submission, whether it carried one comment or several (a batch from `submitComments` queues a single job
+   * covering every item, so the team is never emailed once per item). Idempotent: a retried job where any of
+   * these comments already has a recorded outcome is a no-op.
    */
   async handleNotify(job: JobContext): Promise<void> {
-    const commentId = String(job.payload.commentId ?? '');
-    const already = await this.db.auditLog.count({ where: { resourceId: commentId, action: { in: ['REVIEW_COMMENT_NOTIFIED', 'REVIEW_COMMENT_NOTIFICATION_FAILED'] } } });
+    const commentIds = Array.isArray(job.payload.commentIds)
+      ? (job.payload.commentIds as unknown[]).map(String)
+      : [String(job.payload.commentId ?? '')].filter(Boolean);
+    if (commentIds.length === 0) return;
+    const already = await this.db.auditLog.count({ where: { resourceId: { in: commentIds }, action: { in: ['REVIEW_COMMENT_NOTIFIED', 'REVIEW_COMMENT_NOTIFICATION_FAILED'] } } });
     if (already > 0) return;
 
-    const comment = await this.db.documentReviewComment.findUniqueOrThrow({
-      where: { id: commentId },
+    const comments = await this.db.documentReviewComment.findMany({
+      where: { id: { in: commentIds } },
       include: { shareLink: { include: { createdBy: { include: { roles: true } } } } },
     });
-    const link = comment.shareLink;
+    const first = comments[0];
+    if (!first) return;
+    const link = first.shareLink;
     const creator = link.createdBy;
+
+    const recordOutcome = (action: string, outcome: 'SUCCESS' | 'FAILURE', details: Record<string, unknown>) =>
+      Promise.all(commentIds.map((id) => recordAudit(this.db, { actorType: 'SYSTEM', action, resourceType: 'document_review_comment', resourceId: id, outcome, details })));
 
     const reviewRoles = ROLES.filter((r) => rolesHavePermission([r], 'documents:review'));
     const team = await this.db.user.findMany({ where: { status: 'ACTIVE', roles: { some: { role: { in: reviewRoles } } } }, select: { email: true }, distinct: ['email'] });
     const recipients = team.map((u) => u.email);
     if (recipients.length === 0) {
-      logger.warn('No team member holds documents:review to notify about a review comment', { commentId });
+      logger.warn('No team member holds documents:review to notify about a review comment', { commentIds });
       return;
     }
 
     const gmail = await this.connections.status(creator.id, creator.email);
     if (gmail.status !== 'ACTIVE') {
-      await recordAudit(this.db, {
-        actorType: 'SYSTEM', action: 'REVIEW_COMMENT_NOTIFICATION_FAILED', resourceType: 'document_review_comment', resourceId: commentId, outcome: 'FAILURE',
-        details: { reason: 'GMAIL_NOT_CONNECTED', shareLinkId: link.id },
-      });
+      await recordOutcome('REVIEW_COMMENT_NOTIFICATION_FAILED', 'FAILURE', { reason: 'GMAIL_NOT_CONNECTED', shareLinkId: link.id });
       return;
     }
 
@@ -780,19 +828,20 @@ export class ReviewService {
     // Points staff at the INTERNAL review page (not the public client link) -- reusing the same {{review_link}}
     // placeholder generically, with a different URL for this internal audience.
     const reviewUrl = `${this.publicUrl}/documents/${link.documentId}#comments`;
+    const count = comments.length;
     const draftInput: DraftInput = {
       items: [{ documentId: link.documentId, versionId: link.versionId }],
       to: recipients,
       cc: [],
       bcc: [],
-      subject: 'New review comment on {{document_name}}',
-      body: 'A client left a comment on "{{document_name}}" ({{document_type}}, version {{version_number}}).\n\nReview it here:\n{{review_link}}\n',
+      subject: count === 1 ? 'New review comment on {{document_name}}' : `${count} new review comments on {{document_name}}`,
+      body: `A client left ${count === 1 ? 'a comment' : `${count} comments`} on "{{document_name}}" ({{document_type}}, version {{version_number}}).\n\nReview ${count === 1 ? 'it' : 'them'} here:\n{{review_link}}\n`,
       attach: false,
       extra: { review_link: reviewUrl },
     };
     const draftPreview = await this.email.preview(actorCtx, draftInput);
     const sendInput: SendInput = { ...draftInput, idempotencyKey: this.email.newKey(), confirmationToken: draftPreview.confirmationToken ?? undefined };
     await this.email.send(actorCtx, sendInput, { ip: null, userAgent: null, requestId: `job:${job.id}` });
-    await recordAudit(this.db, { actorType: 'SYSTEM', action: 'REVIEW_COMMENT_NOTIFIED', resourceType: 'document_review_comment', resourceId: commentId, outcome: 'SUCCESS', details: { recipients: recipients.length } });
+    await recordOutcome('REVIEW_COMMENT_NOTIFIED', 'SUCCESS', { recipients: recipients.length, commentCount: count });
   }
 }

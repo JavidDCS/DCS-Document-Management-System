@@ -36,11 +36,14 @@ export function assertEditable(archiveStatus: string) {
 export const REVIEW_SOURCE_APPLY = 'review_apply';
 export const REVIEW_SOURCE_SIGNATURE = 'review_signature';
 export const REVIEW_SOURCE_INCORPORATE = 'review_incorporate';
-const SIGNED_SOURCES: readonly string[] = [REVIEW_SOURCE_SIGNATURE, REVIEW_SOURCE_INCORPORATE];
 
+/** stamp-signature always stamps; incorporate-changes only stamps when a signature was actually configured at
+ * the time (it's optional there), so that source only counts if scanDetails recorded a signatureAssetId. */
 export function versionCarriesSignature(scanDetails: unknown): boolean {
-  const source = (scanDetails as { source?: unknown } | null)?.source;
-  return typeof source === 'string' && SIGNED_SOURCES.includes(source);
+  const d = scanDetails as { source?: unknown; signatureAssetId?: unknown } | null;
+  if (d?.source === REVIEW_SOURCE_SIGNATURE) return true;
+  if (d?.source === REVIEW_SOURCE_INCORPORATE) return typeof d.signatureAssetId === 'string';
+  return false;
 }
 
 export function versionData(documentId: string, n: number, file: UploadedFile, actorId: string, changeNote?: string) {

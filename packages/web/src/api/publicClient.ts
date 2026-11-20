@@ -72,3 +72,27 @@ export async function submitComment(token: string, input: CreateReviewCommentInp
     throw e;
   }
 }
+
+/** Sends every queued item in one request, so the team gets a single notification covering all of them
+ * instead of one email per item. */
+export async function submitComments(token: string, items: CreateReviewCommentInput[]): Promise<ReviewCommentDto[]> {
+  async function attempt(forceCsrf: boolean): Promise<ReviewCommentDto[]> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-CSRF-Token': await getCsrf(forceCsrf) };
+    const res = await fetch(`/api/v1/public/review/${encodeURIComponent(token)}/comments/batch`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers,
+      body: JSON.stringify({ items }),
+    });
+    return parseJson<ReviewCommentDto[]>(res);
+  }
+  try {
+    return await attempt(false);
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 'CSRF_FAILED') {
+      csrfToken = null;
+      return attempt(true);
+    }
+    throw e;
+  }
+}
