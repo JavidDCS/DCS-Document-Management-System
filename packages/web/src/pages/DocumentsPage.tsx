@@ -1,10 +1,11 @@
-import { FilePlus2, FileText, LayoutGrid, List, Search, Send, Trash2, X } from 'lucide-react';
+import { Archive, ArrowRightLeft, FilePlus2, FileText, LayoutGrid, List, Search, Send, Trash2, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api } from '../api';
 import { useAuth } from '../auth/AuthContext';
 import { Badge, ConfirmDialog, Empty, ErrorBanner, PageHeader, Pagination, SkeletonList } from '../components/ui';
+import { MoveTypeModal } from '../components/MoveTypeModal';
 import { useDebounced, useLoad, useTitle } from '../hooks';
 import { fmtDateTime } from '../lib/format';
 import type { DocumentListItem, DocumentTypeDto, ListMeta, TagDto } from '../types';
@@ -18,6 +19,7 @@ export function DocumentsPage() {
   const [search, setSearch] = useState(params.get('search') ?? '');
   const [view, setView] = useState<'table' | 'grid'>('table');
   const [deletingDoc, setDeletingDoc] = useState<DocumentListItem | null>(null);
+  const [movingDoc, setMovingDoc] = useState<DocumentListItem | null>(null);
   const debounced = useDebounced(search);
   const typeId = params.get('typeId') ?? '';
   const tagId = params.get('tagId') ?? '';
@@ -100,10 +102,18 @@ export function DocumentsPage() {
           <button
             type="button"
             role="tab"
-            aria-selected={!typeId}
-            onClick={() => setParam('typeId', '')}
+            aria-selected={!typeId && archive !== 'ARCHIVED'}
+            onClick={() => {
+              setParams((p) => {
+                const n = new URLSearchParams(p);
+                n.delete('typeId');
+                n.delete('archive');
+                n.delete('offset');
+                return n;
+              });
+            }}
             className={`inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-xs font-medium transition-all ${
-              !typeId
+              !typeId && archive !== 'ARCHIVED'
                 ? 'bg-primary text-primary-foreground shadow-xs'
                 : 'bg-card border text-muted-foreground hover:text-foreground hover:bg-muted'
             }`}
@@ -111,21 +121,30 @@ export function DocumentsPage() {
             <span>All Documents</span>
             <span
               className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${
-                !typeId ? 'bg-primary-foreground/20 text-primary-foreground' : 'bg-muted text-muted-foreground'
+                !typeId && archive !== 'ARCHIVED' ? 'bg-primary-foreground/20 text-primary-foreground' : 'bg-muted text-muted-foreground'
               }`}
             >
               {types.data.reduce((acc, t) => acc + (t.documentCount ?? 0), 0)}
             </span>
           </button>
           {types.data.map((t) => {
-            const isSelected = typeId === t.id;
+            const isSelected = typeId === t.id && archive !== 'ARCHIVED';
             return (
               <button
                 key={t.id}
                 type="button"
                 role="tab"
                 aria-selected={isSelected}
-                onClick={() => setParam('typeId', isSelected ? '' : t.id)}
+                onClick={() => {
+                  setParams((p) => {
+                    const n = new URLSearchParams(p);
+                    if (isSelected) n.delete('typeId');
+                    else n.set('typeId', t.id);
+                    n.delete('archive');
+                    n.delete('offset');
+                    return n;
+                  });
+                }}
                 className={`inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-xs font-medium transition-all shrink-0 ${
                   isSelected
                     ? 'bg-primary text-primary-foreground shadow-xs'
@@ -143,6 +162,31 @@ export function DocumentsPage() {
               </button>
             );
           })}
+          {can('documents:manage') && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={archive === 'ARCHIVED'}
+              onClick={() => {
+                setParams((p) => {
+                  const n = new URLSearchParams(p);
+                  if (archive === 'ARCHIVED') n.delete('archive');
+                  else n.set('archive', 'ARCHIVED');
+                  n.delete('typeId');
+                  n.delete('offset');
+                  return n;
+                });
+              }}
+              className={`inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-medium transition-all shrink-0 ${
+                archive === 'ARCHIVED'
+                  ? 'bg-amber-600 text-white shadow-xs'
+                  : 'bg-card border text-muted-foreground hover:text-foreground hover:bg-muted'
+              }`}
+            >
+              <Archive className="size-3" />
+              <span>Archive</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -175,7 +219,9 @@ export function DocumentsPage() {
               </label>
               <label className="field"><span className="sr-only">Archive</span>
                 <select value={archive} onChange={(e) => setParam('archive', e.target.value)} aria-label="Archive">
-                  <option value="">Any archive state</option><option value="LIVE">Live</option><option value="ARCHIVED">Archived</option><option value="LEGAL_HOLD">Legal hold</option>
+                  <option value="">Live library (default)</option>
+                  <option value="ARCHIVED">Archived documents only</option>
+                  <option value="LEGAL_HOLD">Legal hold only</option>
                 </select>
               </label>
             </>
@@ -241,6 +287,14 @@ export function DocumentsPage() {
                             </Link>
                             <button
                               type="button"
+                              className="btn ghost icon small text-muted-foreground hover:text-foreground"
+                              title="Move to another document type"
+                              onClick={() => setMovingDoc(d)}
+                            >
+                              <ArrowRightLeft className="size-3.5" />
+                            </button>
+                            <button
+                              type="button"
                               className="btn ghost icon small text-muted-foreground hover:text-danger"
                               title="Delete document"
                               onClick={() => setDeletingDoc(d)}
@@ -295,14 +349,24 @@ export function DocumentsPage() {
                         <Link to={`/send?documentId=${d.id}`} className="btn small primary">Send</Link>
                       )}
                       {can('documents:manage') && (
-                        <button
-                          type="button"
-                          className="btn ghost icon small text-muted-foreground hover:text-danger"
-                          title="Delete document"
-                          onClick={() => setDeletingDoc(d)}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            className="btn ghost icon small text-muted-foreground hover:text-foreground"
+                            title="Move to another document type"
+                            onClick={() => setMovingDoc(d)}
+                          >
+                            <ArrowRightLeft className="size-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost icon small text-muted-foreground hover:text-danger"
+                            title="Delete document"
+                            onClick={() => setDeletingDoc(d)}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -328,6 +392,20 @@ export function DocumentsPage() {
           onConfirm={async () => {
             await api.del(`/documents/${deletingDoc.id}`);
             toast.success('Document deleted');
+            list.reload();
+            types.reload();
+          }}
+        />
+      )}
+
+      {movingDoc && (
+        <MoveTypeModal
+          documentId={movingDoc.id}
+          documentName={movingDoc.name}
+          currentTypeId={movingDoc.typeId}
+          currentTypeName={movingDoc.typeName}
+          onClose={() => setMovingDoc(null)}
+          onMoved={() => {
             list.reload();
             types.reload();
           }}

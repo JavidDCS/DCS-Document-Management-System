@@ -1,10 +1,11 @@
-import { ArrowDown, ArrowUp, CheckCircle, Eye, FilePlus2, FileText, FileType2, Plus, Settings, Trash2 } from 'lucide-react';
+import { ArrowDown, ArrowRightLeft, ArrowUp, CheckCircle, Eye, FilePlus2, FileText, FileType2, Plus, Settings, Trash2 } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api, ApiError, errorMessage, fieldErrors } from '../../api';
 import { Badge, ConfirmDialog, Empty, ErrorBanner, Field, InfoBanner, Modal, PageHeader, Spinner, Tabs } from '../../components/ui';
 import { MetadataForm } from '../../components/MetadataForm';
+import { MoveTypeModal } from '../../components/MoveTypeModal';
 import { gradientFor } from '../../components/Illustrations';
 import { useLoad, useTitle } from '../../hooks';
 import { fmtDateTime } from '../../lib/format';
@@ -157,6 +158,7 @@ export function DocumentTypeBuilderPage() {
   useTitle(t ? `${t.name} · Schema Builder` : 'Document type');
   const [tab, setTab] = useState<'documents' | 'builder' | 'preview' | 'settings'>('documents');
   const [deletingDoc, setDeletingDoc] = useState<DocumentListItem | null>(null);
+  const [movingDoc, setMovingDoc] = useState<DocumentListItem | null>(null);
   const typeDocs = useLoad(
     async () => {
       const r = await api.get<DocumentListItem[]>('/documents', { typeId: id, limit: 100 });
@@ -298,6 +300,14 @@ export function DocumentTypeBuilderPage() {
                       <td className="text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1.5">
                           <Link to={`/documents/${d.id}`} className="btn small">View</Link>
+                          <button
+                            type="button"
+                            className="btn small"
+                            title="Move to another document type"
+                            onClick={() => setMovingDoc(d)}
+                          >
+                            <ArrowRightLeft className="size-3.5 mr-1" /> Move
+                          </button>
                           <button
                             type="button"
                             className="btn ghost icon small text-muted-foreground hover:text-danger"
@@ -457,6 +467,20 @@ export function DocumentTypeBuilderPage() {
           onConfirm={async () => {
             await api.del(`/documents/${deletingDoc.id}`);
             toast.success('Document deleted');
+            typeDocs.reload();
+            type.reload();
+          }}
+        />
+      )}
+
+      {movingDoc && (
+        <MoveTypeModal
+          documentId={movingDoc.id}
+          documentName={movingDoc.name}
+          currentTypeId={t.id}
+          currentTypeName={t.name}
+          onClose={() => setMovingDoc(null)}
+          onMoved={() => {
             typeDocs.reload();
             type.reload();
           }}

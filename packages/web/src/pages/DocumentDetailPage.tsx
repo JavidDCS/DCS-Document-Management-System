@@ -1,5 +1,5 @@
 import {
-  Archive, ArchiveRestore, CheckCircle2, Clock, Download, Eye, FileText, History, Loader2, MoreHorizontal, Pencil, Power, PowerOff, RotateCcw, Send, ShieldAlert, ShieldCheck, ShieldX, Star, Trash2, Upload,
+  Archive, ArchiveRestore, ArrowRightLeft, CheckCircle2, Clock, Download, Eye, FileText, History, Loader2, MoreHorizontal, Pencil, Power, PowerOff, RotateCcw, Send, ShieldAlert, ShieldCheck, ShieldX, Star, Trash2, Upload,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -8,6 +8,7 @@ import { api, ApiError, errorMessage, fieldErrors } from '../api';
 import { useAuth } from '../auth/AuthContext';
 import { CommentsReviewPanel } from '../components/CommentsReviewPanel';
 import { MetadataForm } from '../components/MetadataForm';
+import { MoveTypeModal } from '../components/MoveTypeModal';
 import { TagPicker } from '../components/TagPicker';
 import { UploadVersion } from '../components/UploadVersion';
 import { ActionMenu, Badge, ConfirmDialog, CopyButton, Empty, ErrorBanner, InfoBanner, Modal, SkeletonList, Spinner, Tabs, cn } from '../components/ui';
@@ -31,6 +32,7 @@ export function DocumentDetailPage() {
   const tags = useLoad(async () => (can('documents:read') ? (await api.get<TagDto[]>('/tags')).data : []), []);
   const [tab, setTab] = useState<TabId>(() => (window.location.hash === '#comments' ? 'comments' : 'overview'));
   const [editing, setEditing] = useState(false);
+  const [movingType, setMovingType] = useState(false);
   const [dialog, setDialog] = useState<null | { kind: 'restore' | 'promote' | 'archive' | 'unarchive' | 'deactivate' | 'delete'; version?: VersionDto }>(null);
   const [preview, setPreview] = useState<VersionDto | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -98,11 +100,18 @@ export function DocumentDetailPage() {
             </div>
           </div>
           <div className="row">
+            {manage && (
+              <button type="button" className="btn" onClick={() => setMovingType(true)}>
+                <ArrowRightLeft className="size-4" />
+                Move type
+              </button>
+            )}
             {can('email:send') && sendable && <Link className="btn primary" to={`/send?documentId=${d.id}`}><Send className="size-4" />Send</Link>}
             <ActionMenu
               label="Document actions"
               trigger={<button className="btn"><MoreHorizontal className="size-4" />Actions</button>}
               actions={[
+                { label: 'Move to another type', icon: ArrowRightLeft, hidden: !manage, onSelect: () => setMovingType(true) },
                 { label: 'Edit details', icon: Pencil, hidden: !manage, onSelect: () => { setTab('overview'); setEditing(true); } },
                 { label: 'Upload new version', icon: Upload, hidden: !can('versions:create'), onSelect: () => { setTab('versions'); setUploading(true); } },
                 { label: 'Activate', icon: Power, hidden: !(manage && !d.isActive && d.currentVersionId), onSelect: () => act(() => api.post(`/documents/${d.id}/activate`), 'Document activated') },
@@ -119,6 +128,11 @@ export function DocumentDetailPage() {
       <div className="stack gap-3 mb-4 empty:hidden">
         {actionError != null && <ErrorBanner error={actionError} />}
         {pending && <InfoBanner>A file is being scanned. This page updates automatically.</InfoBanner>}
+        {d.archiveStatus === 'ARCHIVED' && (
+          <InfoBanner kind="warn">
+            This document is archived. It is hidden from active document lists, category folders, search, and sending. To make it visible again, use Actions &gt; Unarchive.
+          </InfoBanner>
+        )}
         {d.versions.some((v) => v.scanStatus === 'QUARANTINED' || v.scanStatus === 'REJECTED') && (
           <InfoBanner kind="warn">One or more uploaded files were blocked by the security scan and cannot be sent or downloaded. See the versions tab for the reason.</InfoBanner>
         )}
@@ -239,6 +253,18 @@ export function DocumentDetailPage() {
             await api.del(`/documents/${d.id}`);
             toast.success('Document deleted');
             nav('/documents');
+          }}
+        />
+      )}
+      {movingType && (
+        <MoveTypeModal
+          documentId={d.id}
+          documentName={d.name}
+          currentTypeId={d.typeId}
+          currentTypeName={d.typeName}
+          onClose={() => setMovingType(false)}
+          onMoved={() => {
+            doc.reload();
           }}
         />
       )}

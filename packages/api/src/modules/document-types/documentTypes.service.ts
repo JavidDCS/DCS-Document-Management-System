@@ -112,7 +112,7 @@ export class DocumentTypesService {
   private async load(id: string, db: Tx | PrismaClient = this.db): Promise<TypeRow> {
     const t = await db.documentType.findUnique({
       where: { id },
-      include: { fields: true, _count: { select: { documents: true } } },
+      include: { fields: true, _count: { select: { documents: { where: { archiveStatus: 'LIVE' } } } } },
     });
     if (!t) throw new HttpError(404, 'Document type not found');
     return t;
@@ -122,7 +122,7 @@ export class DocumentTypesService {
     const onlyActive = !canManage || activeOnly === true;
     const rows = await this.db.documentType.findMany({
       where: onlyActive ? { isActive: true } : {},
-      include: { fields: true, _count: { select: { documents: true } } },
+      include: { fields: true, _count: { select: { documents: { where: { archiveStatus: 'LIVE' } } } } },
       orderBy: [{ name: 'asc' }],
     });
     return rows.map((r) => toTypeDto(r, { onlyActiveFields: !canManage }));

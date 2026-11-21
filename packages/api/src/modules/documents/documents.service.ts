@@ -292,7 +292,17 @@ export class DocumentsService {
 
       if (patch.metadata !== undefined || patch.documentTypeId !== undefined) {
         const type = await this.types.getDefinition(typeId);
-        const inputMeta = (patch.metadata ?? (cur.metadata ?? {})) as Record<string, unknown>;
+        let inputMeta = patch.metadata;
+        if (inputMeta === undefined) {
+          if (patch.documentTypeId !== undefined && patch.documentTypeId !== cur.documentTypeId) {
+            const knownKeys = new Set(type.fields.map((f) => f.key));
+            inputMeta = Object.fromEntries(
+              Object.entries((cur.metadata ?? {}) as Record<string, unknown>).filter(([k]) => knownKeys.has(k))
+            );
+          } else {
+            inputMeta = (cur.metadata ?? {}) as Record<string, unknown>;
+          }
+        }
         const m = this.validate(type.fields, inputMeta, (cur.metadata ?? {}) as Record<string, unknown>);
         data.metadata = m.value as Prisma.InputJsonObject;
         data.searchText = m.searchText;
