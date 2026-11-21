@@ -31,6 +31,8 @@ export interface PdfCanvasViewerProps {
   pending?: PlacedPin | PlacedBox | null;
   selectedCommentId?: string | null;
   onSelectComment?: (id: string) => void;
+  /** When false, hides all comment pin/box overlay elements so the clean PDF can be seen. Defaults to true. */
+  showOverlays?: boolean;
 }
 
 const STATUS_DOT: Record<ReviewCommentDto['status'], string> = {
@@ -60,7 +62,7 @@ function isBox(p: PlacedPin | PlacedBox): p is PlacedBox {
 }
 
 /** Renders one PDF page at a time to a canvas, with an overlay for comment pins and suggested-change boxes. Not continuous scroll. */
-export function PdfCanvasViewer({ fileUrl, comments, onPlacePin, onPlaceBox, pending, selectedCommentId, onSelectComment }: PdfCanvasViewerProps) {
+export function PdfCanvasViewer({ fileUrl, comments, onPlacePin, onPlaceBox, pending, selectedCommentId, onSelectComment, showOverlays = true }: PdfCanvasViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTokenRef = useRef(0);
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
@@ -226,7 +228,7 @@ export function PdfCanvasViewer({ fileUrl, comments, onPlacePin, onPlaceBox, pen
             role={interactive ? 'application' : undefined}
             aria-label={interactive ? 'Click to leave a comment, or drag a box around text you want changed' : undefined}
           >
-            {marksOnPage.map((c) =>
+            {showOverlays && marksOnPage.map((c) =>
               c.kind === 'CHANGE' && c.boxWPct !== null && c.boxHPct !== null ? (
                 <button
                   key={c.id}

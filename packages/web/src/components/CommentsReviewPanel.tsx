@@ -1,7 +1,10 @@
 import type { ReviewCommentDto, ShareLinkDto, ShareLinkStatus } from '@dcs-docs/shared';
+import { CheckCircle2, Download, Eye, Layers, Send } from 'lucide-react';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api } from '../api';
+import { useAuth } from '../auth/AuthContext';
 import { FilePicker } from './FilePicker';
 import { useLoad } from '../hooks';
 import { fmtDateTime, saveBlob } from '../lib/format';
@@ -201,10 +204,12 @@ function SendModifiedCopyForm({ doc, links }: { doc: DocumentDetail; links: Shar
  * accept/dismiss each -> prepare the modified PDF elsewhere (e.g. Stirling-PDF) -> send it to the client.
  * The panel always tells staff which step is next. It reuses the page's already-loaded `doc`.
  */
-export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
+export function CommentsReviewPanel({ doc, onReload }: { doc: DocumentDetail; onReload?: () => void }) {
+  const { can } = useAuth();
   const comments = useLoad(async () => (await api.get<ReviewCommentDto[]>(`/documents/${doc.id}/review-comments`)).data, [doc.id]);
   const shareLinks = useLoad(async () => (await api.get<ShareLinkDto[]>(`/documents/${doc.id}/share-links`)).data, [doc.id]);
   const [selected, setSelected] = useState<string | null>(null);
+  const [showOverlays, setShowOverlays] = useState(true);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfError, setPdfError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -231,11 +236,19 @@ export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
     };
   }, [doc.id, doc.currentVersionId]);
 
+  async function downloadCurrent() {
+    if (!doc.currentVersionId) return;
+    const r = await api.blob(`/documents/${doc.id}/versions/${doc.currentVersionId}/content`);
+    saveBlob(r.blob, r.filename ?? `${doc.name}.pdf`);
+  }
+
   const list = useMemo(
     () => (comments.data ?? []).slice().sort((a, b) => Number(b.status === 'OPEN') - Number(a.status === 'OPEN') || a.createdAt.localeCompare(b.createdAt)),
     [comments.data]
   );
   const links = shareLinks.data ?? [];
+  const clientEmail = links[0]?.recipientEmail;
+  const hasApplied = list.some((c) => c.status === 'ACCEPTED' && c.applied);
 
   const openCount = list.filter((c) => c.status === 'OPEN').length;
 
@@ -247,6 +260,7 @@ export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
       toast.success(success);
       comments.reload();
       shareLinks.reload();
+      onReload?.();
     } catch (e) {
       setActionError(e);
     } finally {
@@ -306,9 +320,31 @@ export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
       {comments.data && (
         <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
           <div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-muted-foreground font-medium">
+                Document Preview (Version {doc.currentVersionNumber ?? 1})
+              </span>
+              <button
+                type="button"
+                className="btn ghost small text-xs !h-7 !px-2 text-muted-foreground hover:text-foreground"
+                onClick={() => setShowOverlays((o) => !o)}
+                title={showOverlays ? 'Hide comment bounding boxes to inspect the clean PDF' : 'Show comment bounding boxes'}
+              >
+                <Layers className="size-3.5 mr-1" />
+                {showOverlays ? 'Hide comment highlights' : 'Show comment highlights'}
+              </button>
+            </div>
             {pdfError != null && <ErrorBanner error={pdfError} />}
             {!pdfUrl && pdfError == null && <Spinner label="Decrypting the document…" />}
-            {pdfUrl && <PdfCanvasViewer fileUrl={pdfUrl} comments={list} selectedCommentId={selected} onSelectComment={setSelected} />}
+            {pdfUrl && (
+              <PdfCanvasViewer
+                fileUrl={pdfUrl}
+                comments={list}
+                selectedCommentId={selected}
+                onSelectComment={setSelected}
+                showOverlays={showOverlays}
+              />
+            )}
           </div>
           <div className="stack gap-2">
             {list.length === 0 && <InfoBanner>No comments yet from any client review link for this document.</InfoBanner>}
@@ -357,14 +393,58 @@ export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
                 )}
               </div>
             ))}
-            <EditInStirlingSection doc={doc} />
           </div>
         </div>
       )}
 
-      <div className="mt-5 stack gap-3 border-t pt-4">
-        <SendModifiedCopyForm doc={doc} links={links} />
-      </div>
+      {hasApplied && (
+        <div className="rounded-xl border border-success/40 bg-success/5 p-4 mt-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="size-4 text-success" />
+                <span className="font-semibold text-sm text-foreground">
+                  Changes automatically applied to Version {doc.currentVersionNumber ?? 2}
+                </span>
+                <Badge tone="ok">Auto-Applied</Badge>
+              </div>
+              <p className="muted text-xs mt-1 mb-0">
+                All accepted client changes have been stamped directly into the document. You can view the modified PDF or send it to the client immediately.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {pdfUrl && (
+                <a href={pdfUrl} target="_blank" rel="noopener noreferrer" className="btn small">
+                  <Eye className="size-3.5" /> View modified PDF
+                </a>
+              )}
+              {doc.currentVersionId && (
+                <button type="button" className="btn small" onClick={downloadCurrent}>
+                  <Download className="size-3.5" /> Download PDF
+                </button>
+              )}
+              {can('email:send') && clientEmail && (
+                <Link
+                  to={`/send?documentId=${doc.id}&to=${encodeURIComponent(clientEmail)}`}
+                  className="btn small primary"
+                >
+                  <Send className="size-3.5" /> Send to client ({clientEmail})
+                </Link>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <details className="mt-5 rounded-lg border bg-muted/20 p-3 text-xs">
+        <summary className="cursor-pointer font-medium text-muted-foreground hover:text-foreground">
+          Need manual PDF editing or custom attachment? (Advanced)
+        </summary>
+        <div className="mt-3 stack gap-4">
+          <EditInStirlingSection doc={doc} />
+          <SendModifiedCopyForm doc={doc} links={links} />
+        </div>
+      </details>
     </div>
   );
 }

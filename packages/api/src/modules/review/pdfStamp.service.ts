@@ -87,11 +87,11 @@ export async function applyReplacements(pdfBytes: Buffer, items: readonly TextRe
     // The browser measures from the top-left corner; PDF user space measures from the bottom-left.
     const y = pageH - it.yPct * pageH - h;
 
-    let size = Math.max(MIN_FONT_PT, Math.min(MAX_FONT_PT, h * 0.75));
+    let size = Math.max(MIN_FONT_PT, Math.min(MAX_FONT_PT, Math.max(9.5, h * 0.85)));
     try {
       while (size > MIN_FONT_PT && font.widthOfTextAtSize(it.text, size) > Math.max(1, w - 2)) size -= 0.25;
       page.drawRectangle({ x, y, width: w, height: h, color: rgb(1, 1, 1) });
-      page.drawText(it.text, { x: x + 1, y: y + (h - size) / 2 + size * 0.2, size, font, color: rgb(0, 0, 0) });
+      page.drawText(it.text, { x: x + 1, y: y + (h - size) / 2 + size * 0.15, size, font, color: rgb(0, 0, 0) });
     } catch (e) {
       // pdf-lib throws "WinAnsi cannot encode ..." for a glyph the standard font lacks.
       if (e instanceof Error && /cannot encode/i.test(e.message)) throw new UnsupportedTextError(it.text);

@@ -81,6 +81,14 @@ export function SendPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preselect]);
 
+  const prefillTo = params.get('to');
+  useEffect(() => {
+    if (prefillTo && !to.includes(prefillTo)) {
+      setTo([prefillTo]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillTo]);
+
   // Opened from the Leads Manager app with ?handoff=<id>: prefill To, preselect its document (if any) or else
   // filter the search to its document type, and show a banner. The person still reviews and confirms as today.
   const handoff = useLoad(async () => (handoffId ? (await api.get<HandoffLookup>(`/email/handoffs/${handoffId}`)).data : null), [handoffId]);
