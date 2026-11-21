@@ -1,6 +1,6 @@
 import { FileType2, Loader2, UploadCloud } from 'lucide-react';
-import { useMemo, useState, type FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api, ApiError, errorMessage, fieldErrors } from '../api';
 import { useAuth } from '../auth/AuthContext';
@@ -19,8 +19,16 @@ export function DocumentNewPage() {
   const types = useLoad(async () => (await api.get<DocumentTypeDto[]>('/document-types', { active: 'true' })).data, []);
   const tags = useLoad(async () => (await api.get<TagDto[]>('/tags')).data, []);
 
-  const [typeId, setTypeId] = useState('');
+  const [searchParams] = useSearchParams();
+  const urlTypeId = searchParams.get('typeId') ?? '';
+  const [typeId, setTypeId] = useState(urlTypeId);
   const type = useMemo(() => types.data?.find((t) => t.id === typeId) ?? null, [types.data, typeId]);
+
+  useEffect(() => {
+    if (urlTypeId && types.data?.some((t) => t.id === urlTypeId)) {
+      pickType(urlTypeId);
+    }
+  }, [urlTypeId, types.data]);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [metadata, setMetadata] = useState<Record<string, unknown>>({});

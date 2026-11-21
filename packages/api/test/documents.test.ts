@@ -587,9 +587,32 @@ describe.skipIf(skipDb)('documents, uploads and versions (database + real local 
       const actions = (await prisma.auditLog.findMany({ where: { resourceId: id, action: { startsWith: 'DOCUMENT_' } } })).map((a) => a.action);
       expect(actions).toEqual(expect.arrayContaining(['DOCUMENT_ARCHIVED', 'DOCUMENT_UNARCHIVED', 'DOCUMENT_LEGAL_HOLD_SET', 'DOCUMENT_LEGAL_HOLD_RELEASED']));
     });
+
+    it('deletes a mistakenly uploaded document, hiding it from default lists and recording an audit log', async () => {
+      const id = await createClean();
+      expect((await admin.del(`/documents/${id}`)).status).toBe(200);
+
+      // Hidden from default list
+      const list = await admin.get('/documents');
+      expect(list.body.data.map((d: any) => d.id)).not.toContain(id);
+
+      // Audit recorded
+      const audit = await prisma.auditLog.findFirstOrThrow({ where: { action: 'DOCUMENT_DELETED', resourceId: id } });
+      expect(audit.outcome).toBe('SUCCESS');
+    });
   });
 
   describe('editing and searching', () => {
+    it('allows changing document type to fix mistakenly uploaded document types', async () => {
+      const t1 = (await admin.post('/document-types', { name: uniq('Type 1'), fields: [] })).body.data;
+      const t2 = (await admin.post('/document-types', { name: uniq('Type 2'), fields: [] })).body.data;
+      const id = await createClean({ type: t1.id, metadata: {} });
+
+      const moved = await admin.patch(`/documents/${id}`, { documentTypeId: t2.id, metadata: {} });
+      expect(moved.status).toBe(200);
+      expect(moved.body.data.typeId).toBe(t2.id);
+      expect(moved.body.data.typeName).toBe(t2.name);
+    });
     it('edits name, description, tags and metadata with validation; inactive-field values are kept', async () => {
       const t = (await admin.post('/document-types', { name: uniq('Edit type'), fields: [{ key: 'a', fieldType: 'TEXT', label: 'A', required: true, searchable: true }, { key: 'b', fieldType: 'TEXT', label: 'B' }] })).body.data;
       const id = await createClean({ type: t.id, metadata: { a: 'one', b: 'keep me' } });

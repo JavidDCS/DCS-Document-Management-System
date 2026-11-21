@@ -86,6 +86,7 @@ export const updateDocumentSchema = z
   .strictObject({
     name: documentName.optional(),
     description: description.nullable().optional(),
+    documentTypeId: z.uuid().optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
     tagIds: z.array(z.uuid()).max(30).optional(),
   })

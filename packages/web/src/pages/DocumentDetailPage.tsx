@@ -1,8 +1,8 @@
 import {
-  Archive, ArchiveRestore, CheckCircle2, Clock, Download, Eye, FileText, History, Loader2, MoreHorizontal, Pencil, Power, PowerOff, RotateCcw, Send, ShieldAlert, ShieldCheck, ShieldX, Star, Upload,
+  Archive, ArchiveRestore, CheckCircle2, Clock, Download, Eye, FileText, History, Loader2, MoreHorizontal, Pencil, Power, PowerOff, RotateCcw, Send, ShieldAlert, ShieldCheck, ShieldX, Star, Trash2, Upload,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api, ApiError, errorMessage, fieldErrors } from '../api';
 import { useAuth } from '../auth/AuthContext';
@@ -14,7 +14,7 @@ import { ActionMenu, Badge, ConfirmDialog, CopyButton, Empty, ErrorBanner, InfoB
 import { useLoad, usePolling, useTitle } from '../hooks';
 import { fmtDateTime, fmtSize, saveBlob } from '../lib/format';
 import { cleanMetadata, displayValue, initialMetadata, validateMetadataLocal } from '../lib/metadata';
-import type { DocumentDetail, ScanStatus, TagDto, VersionDto } from '../types';
+import type { DocumentDetail, DocumentTypeDto, ScanStatus, TagDto, VersionDto } from '../types';
 
 const scanTone = (s: ScanStatus) => (s === 'CLEAN' ? 'ok' : s === 'PENDING' ? 'info' : 'bad') as 'ok' | 'info' | 'bad';
 const scanText: Record<ScanStatus, string> = { PENDING: 'Scanning…', CLEAN: 'Clean', QUARANTINED: 'Quarantined', REJECTED: 'Rejected' };
@@ -25,12 +25,13 @@ type TabId = 'overview' | 'versions' | 'access' | 'comments';
 
 export function DocumentDetailPage() {
   const { id = '' } = useParams();
+  const nav = useNavigate();
   const { can } = useAuth();
   const doc = useLoad(async () => (await api.get<DocumentDetail>(`/documents/${id}`)).data, [id]);
   const tags = useLoad(async () => (can('documents:read') ? (await api.get<TagDto[]>('/tags')).data : []), []);
   const [tab, setTab] = useState<TabId>(() => (window.location.hash === '#comments' ? 'comments' : 'overview'));
   const [editing, setEditing] = useState(false);
-  const [dialog, setDialog] = useState<null | { kind: 'restore' | 'promote' | 'archive' | 'unarchive' | 'deactivate'; version?: VersionDto }>(null);
+  const [dialog, setDialog] = useState<null | { kind: 'restore' | 'promote' | 'archive' | 'unarchive' | 'deactivate' | 'delete'; version?: VersionDto }>(null);
   const [preview, setPreview] = useState<VersionDto | null>(null);
   const [uploading, setUploading] = useState(false);
   const [actionError, setActionError] = useState<unknown>(null);
@@ -108,6 +109,7 @@ export function DocumentDetailPage() {
                 { label: 'Deactivate', icon: PowerOff, hidden: !(manage && d.isActive), onSelect: () => setDialog({ kind: 'deactivate' }) },
                 { label: 'Archive', icon: Archive, hidden: !(can('documents:archive') && d.archiveStatus === 'LIVE'), onSelect: () => setDialog({ kind: 'archive' }) },
                 { label: 'Unarchive', icon: ArchiveRestore, hidden: !(can('documents:archive') && d.archiveStatus === 'ARCHIVED'), onSelect: () => setDialog({ kind: 'unarchive' }) },
+                { label: 'Delete document', icon: Trash2, danger: true, hidden: !manage, onSelect: () => setDialog({ kind: 'delete' }) },
               ]}
             />
           </div>
@@ -222,6 +224,24 @@ export function DocumentDetailPage() {
       {dialog?.kind === 'unarchive' && (
         <ConfirmDialog title="Unarchive this document?" message="It returns to the library." confirmLabel="Unarchive" onClose={() => setDialog(null)} onConfirm={async () => { await api.post(`/documents/${d.id}/unarchive`); toast.success('Document unarchived'); doc.reload(); }} />
       )}
+      {dialog?.kind === 'delete' && (
+        <ConfirmDialog
+          title="Delete this document?"
+          message={
+            <span>
+              Are you sure you want to delete <strong>{d.name}</strong>? It will be archived and hidden from active documents.
+            </span>
+          }
+          confirmLabel="Delete document"
+          danger
+          onClose={() => setDialog(null)}
+          onConfirm={async () => {
+            await api.del(`/documents/${d.id}`);
+            toast.success('Document deleted');
+            nav('/documents');
+          }}
+        />
+      )}
     </>
   );
 }
@@ -260,24 +280,41 @@ function FieldRow({ label, value }: { label: string; value: string }) {
 }
 
 function EditForm({ doc, allTags, onCancel, onSaved }: { doc: DocumentDetail; allTags: TagDto[]; onCancel: () => void; onSaved: () => void }) {
+  const allTypes = useLoad(async () => (await api.get<DocumentTypeDto[]>('/document-types')).data, []);
+  const [typeId, setTypeId] = useState(doc.typeId);
   const [name, setName] = useState(doc.name);
   const [description, setDescription] = useState(doc.description ?? '');
-  const [metadata, setMetadata] = useState(() => initialMetadata(doc.type.fields, doc.metadata));
+  const activeType = allTypes.data?.find((t) => t.id === typeId) ?? doc.type;
+  const [metadata, setMetadata] = useState(() => initialMetadata(activeType.fields, doc.metadata));
   const [tagIds, setTagIds] = useState(doc.tags.map((t) => t.id));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  function handleTypeChange(newTypeId: string) {
+    setTypeId(newTypeId);
+    const targetType = allTypes.data?.find((t) => t.id === newTypeId);
+    if (targetType) {
+      setMetadata(initialMetadata(targetType.fields, newTypeId === doc.typeId ? doc.metadata : {}));
+    }
+  }
+
   async function save() {
     const local: Record<string, string> = {};
     if (!name.trim()) local.name = 'Enter a name';
-    for (const i of validateMetadataLocal(doc.type.fields, metadata)) local[i.path] = i.message;
+    for (const i of validateMetadataLocal(activeType.fields, metadata)) local[i.path] = i.message;
     setErrors(local);
     if (Object.keys(local).length) return;
     setBusy(true);
     setError(null);
     try {
-      await api.patch(`/documents/${doc.id}`, { name: name.trim(), description: description.trim() || null, metadata: cleanMetadata(doc.type.fields, metadata), tagIds });
+      await api.patch(`/documents/${doc.id}`, {
+        name: name.trim(),
+        description: description.trim() || null,
+        documentTypeId: typeId !== doc.typeId ? typeId : undefined,
+        metadata: cleanMetadata(activeType.fields, metadata),
+        tagIds,
+      });
       onSaved();
     } catch (e) {
       setErrors(fieldErrors(e));
@@ -290,10 +327,31 @@ function EditForm({ doc, allTags, onCancel, onSaved }: { doc: DocumentDetail; al
     <div className="stack">
       {error && <ErrorBanner message={error} />}
       <div className="form-grid">
-        <label className="field"><span>Name</span><input value={name} onChange={(e) => setName(e.target.value)} maxLength={200} />{errors.name && <small className="error-text">{errors.name}</small>}</label>
-        <label className="field"><span>Description</span><input value={description} onChange={(e) => setDescription(e.target.value)} maxLength={1000} /></label>
+        <label className="field">
+          <span>Name</span>
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={200} />
+          {errors.name && <small className="error-text">{errors.name}</small>}
+        </label>
+        <label className="field">
+          <span>Document type</span>
+          <select value={typeId} onChange={(e) => handleTypeChange(e.target.value)}>
+            {allTypes.data ? (
+              allTypes.data.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))
+            ) : (
+              <option value={doc.typeId}>{doc.typeName}</option>
+            )}
+          </select>
+        </label>
+        <label className="field sm:col-span-2">
+          <span>Description</span>
+          <input value={description} onChange={(e) => setDescription(e.target.value)} maxLength={1000} />
+        </label>
       </div>
-      <MetadataForm fields={doc.type.fields} values={metadata} onChange={setMetadata} errors={errors} />
+      <MetadataForm fields={activeType.fields} values={metadata} onChange={setMetadata} errors={errors} />
       <h3 className="!mb-0">Tags</h3>
       <TagPicker tags={allTags} selected={tagIds} onChange={setTagIds} />
       <div className="row end">

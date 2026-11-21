@@ -1,9 +1,10 @@
-import { FilePlus2, FileText, LayoutGrid, List, Search, Send, X } from 'lucide-react';
+import { FilePlus2, FileText, LayoutGrid, List, Search, Send, Trash2, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { api } from '../api';
 import { useAuth } from '../auth/AuthContext';
-import { Badge, Empty, ErrorBanner, PageHeader, Pagination, SkeletonList } from '../components/ui';
+import { Badge, ConfirmDialog, Empty, ErrorBanner, PageHeader, Pagination, SkeletonList } from '../components/ui';
 import { useDebounced, useLoad, useTitle } from '../hooks';
 import { fmtDateTime } from '../lib/format';
 import type { DocumentListItem, DocumentTypeDto, ListMeta, TagDto } from '../types';
@@ -16,6 +17,7 @@ export function DocumentsPage() {
   const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState(params.get('search') ?? '');
   const [view, setView] = useState<'table' | 'grid'>('table');
+  const [deletingDoc, setDeletingDoc] = useState<DocumentListItem | null>(null);
   const debounced = useDebounced(search);
   const typeId = params.get('typeId') ?? '';
   const tagId = params.get('tagId') ?? '';
@@ -93,6 +95,57 @@ export function DocumentsPage() {
         </div>
       </PageHeader>
 
+      {types.data && types.data.length > 0 && (
+        <div className="mb-4 flex items-center gap-2 overflow-x-auto pb-1" role="tablist" aria-label="Document category filters">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={!typeId}
+            onClick={() => setParam('typeId', '')}
+            className={`inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-xs font-medium transition-all ${
+              !typeId
+                ? 'bg-primary text-primary-foreground shadow-xs'
+                : 'bg-card border text-muted-foreground hover:text-foreground hover:bg-muted'
+            }`}
+          >
+            <span>All Documents</span>
+            <span
+              className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${
+                !typeId ? 'bg-primary-foreground/20 text-primary-foreground' : 'bg-muted text-muted-foreground'
+              }`}
+            >
+              {types.data.reduce((acc, t) => acc + (t.documentCount ?? 0), 0)}
+            </span>
+          </button>
+          {types.data.map((t) => {
+            const isSelected = typeId === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={isSelected}
+                onClick={() => setParam('typeId', isSelected ? '' : t.id)}
+                className={`inline-flex items-center gap-2 rounded-full px-3.5 py-1.5 text-xs font-medium transition-all shrink-0 ${
+                  isSelected
+                    ? 'bg-primary text-primary-foreground shadow-xs'
+                    : 'bg-card border text-muted-foreground hover:text-foreground hover:bg-muted'
+                }`}
+              >
+                <span>{t.name}</span>
+                <span
+                  className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${
+                    isSelected ? 'bg-primary-foreground/20 text-primary-foreground' : 'bg-muted text-muted-foreground'
+                  }`}
+                >
+                  {t.documentCount ?? 0}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <form className="card !p-4" role="search" onSubmit={(e) => e.preventDefault()}>
         <div className="grid gap-3 md:grid-cols-[minmax(0,2fr)_repeat(2,minmax(0,1fr))]">
           <label className="field"><span className="sr-only">Search</span>
@@ -150,7 +203,17 @@ export function DocumentsPage() {
           {view === 'table' ? (
             <div className="table-wrap" aria-busy={list.loading}>
               <table>
-                <thead><tr><th>Name</th><th>Type</th><th>Version</th><th>Tags</th><th>Status</th><th>Updated</th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Version</th>
+                    <th>Tags</th>
+                    <th>Status</th>
+                    <th>Updated</th>
+                    {can('documents:manage') && <th className="text-right">Actions</th>}
+                  </tr>
+                </thead>
                 <tbody>
                   {list.data.rows.map((d) => (
                     <tr key={d.id}>
@@ -170,6 +233,23 @@ export function DocumentsPage() {
                         </div>
                       </td>
                       <td className="muted whitespace-nowrap">{fmtDateTime(d.updatedAt)}</td>
+                      {can('documents:manage') && (
+                        <td className="text-right whitespace-nowrap">
+                          <div className="flex items-center justify-end gap-1">
+                            <Link to={`/documents/${d.id}`} className="btn ghost icon small" title="View details">
+                              <FileText className="size-3.5" />
+                            </Link>
+                            <button
+                              type="button"
+                              className="btn ghost icon small text-muted-foreground hover:text-danger"
+                              title="Delete document"
+                              onClick={() => setDeletingDoc(d)}
+                            >
+                              <Trash2 className="size-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -214,6 +294,16 @@ export function DocumentsPage() {
                       {d.isActive && can('email:send') && (
                         <Link to={`/send?documentId=${d.id}`} className="btn small primary">Send</Link>
                       )}
+                      {can('documents:manage') && (
+                        <button
+                          type="button"
+                          className="btn ghost icon small text-muted-foreground hover:text-danger"
+                          title="Delete document"
+                          onClick={() => setDeletingDoc(d)}
+                        >
+                          <Trash2 className="size-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -222,6 +312,26 @@ export function DocumentsPage() {
           )}
           <Pagination total={list.data.meta.total} limit={LIMIT} offset={offset} onChange={(o) => setParams((p) => { const n = new URLSearchParams(p); n.set('offset', String(o)); return n; })} />
         </>
+      )}
+
+      {deletingDoc && (
+        <ConfirmDialog
+          title="Delete document?"
+          message={
+            <span>
+              Are you sure you want to delete <strong>{deletingDoc.name}</strong>? It will be archived and hidden from active documents.
+            </span>
+          }
+          confirmLabel="Delete document"
+          danger
+          onClose={() => setDeletingDoc(null)}
+          onConfirm={async () => {
+            await api.del(`/documents/${deletingDoc.id}`);
+            toast.success('Document deleted');
+            list.reload();
+            types.reload();
+          }}
+        />
       )}
     </>
   );

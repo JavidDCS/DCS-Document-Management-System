@@ -305,6 +305,28 @@ describe.skipIf(skipDb)('dynamic document types (database)', () => {
       const reauthed = await signIn(app, (await prisma.user.findUniqueOrThrow({ where: { id: admin.user.id } })).email);
       admin = reauthed;
     });
+
+    it('refuses deletion while documents exist, and allows deletion once empty', async () => {
+      const t = await makeType();
+      await withDocuments(async () => {
+        const res = await admin.del(`/document-types/${t.id}`);
+        expect(res.status).toBe(409);
+        expect(res.body.error.message).toMatch(/still has 3 document/i);
+      });
+      const del = await admin.del(`/document-types/${t.id}`);
+      expect(del.status).toBe(200);
+      expect(del.body.data).toMatchObject({ id: t.id, deleted: true });
+      expect((await admin.get(`/document-types/${t.id}`)).status).toBe(404);
+    });
+
+    it('exposes documentCount on listed document types', async () => {
+      const t = await makeType();
+      const list = await admin.get('/document-types');
+      expect(list.status).toBe(200);
+      const found = list.body.data.find((x: any) => x.id === t.id);
+      expect(found).toBeDefined();
+      expect(found.documentCount).toBeTypeOf('number');
+    });
   });
 
   it('writes audit entries for every change and keeps the chain valid', async () => {

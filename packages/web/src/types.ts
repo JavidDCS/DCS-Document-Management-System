@@ -95,6 +95,7 @@ export interface DocumentTypeDto {
   isActive: boolean;
   fieldsVersion: number;
   fields: FieldDefinition[];
+  documentCount?: number;
   createdAt: string;
   updatedAt: string;
 }

@@ -355,6 +355,8 @@ export interface DocumentTypeDto {
   fields: FieldDefinition[];
   /** This type's fixed client-review fields, if any have been configured -- see reviewFields.ts. */
   reviewFieldsConfig: ReviewFieldDef[] | null;
+  /** Number of live documents of this type. */
+  documentCount?: number;
   createdAt: string;
   updatedAt: string;
 }

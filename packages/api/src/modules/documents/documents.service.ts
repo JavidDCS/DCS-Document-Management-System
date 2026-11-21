@@ -123,6 +123,7 @@ export class DocumentsService {
     if (q.tagId) filters.push({ tags: { some: { tagId: q.tagId } } });
     if (q.active) filters.push({ isActive: q.active === 'true' });
     if (q.archive && manager) filters.push({ archiveStatus: q.archive });
+    else if (!q.archive && manager) filters.push({ archiveStatus: 'LIVE' });
     if (q.search) {
       const term = likeEscape(q.search);
       filters.push({
@@ -270,23 +271,33 @@ export class DocumentsService {
     }
   }
 
-  async update(actor: AuthContext, id: string, patch: { name?: string | undefined; description?: string | null | undefined; metadata?: Record<string, unknown> | undefined; tagIds?: string[] | undefined }, meta: RequestMeta): Promise<DocumentDetail> {
+  async update(actor: AuthContext, id: string, patch: { name?: string | undefined; description?: string | null | undefined; documentTypeId?: string | undefined; metadata?: Record<string, unknown> | undefined; tagIds?: string[] | undefined }, meta: RequestMeta): Promise<DocumentDetail> {
     const tagIds = patch.tagIds !== undefined ? await this.resolveTags(patch.tagIds) : undefined;
     await this.db.$transaction(async (tx) => {
       const doc = await lockDocument(tx, id);
       assertEditable(doc.archiveStatus);
-      const cur = await tx.document.findUniqueOrThrow({ where: { id }, select: { metadata: true, name: true, description: true } });
+      const cur = await tx.document.findUniqueOrThrow({ where: { id }, select: { metadata: true, name: true, description: true, documentTypeId: true } });
       const data: Prisma.DocumentUpdateInput = {};
       const changed: string[] = [];
       if (patch.name !== undefined && patch.name !== cur.name) (data.name = patch.name), changed.push('name');
       if (patch.description !== undefined && patch.description !== cur.description) (data.description = patch.description), changed.push('description');
-      if (patch.metadata !== undefined) {
-        const type = await this.types.getDefinition(doc.documentTypeId);
-        const m = this.validate(type.fields, patch.metadata, (cur.metadata ?? {}) as Record<string, unknown>);
+      
+      let typeId = cur.documentTypeId;
+      if (patch.documentTypeId !== undefined && patch.documentTypeId !== cur.documentTypeId) {
+        const newType = await this.types.getDefinition(patch.documentTypeId);
+        data.documentType = { connect: { id: newType.id } };
+        typeId = newType.id;
+        changed.push('documentTypeId');
+      }
+
+      if (patch.metadata !== undefined || patch.documentTypeId !== undefined) {
+        const type = await this.types.getDefinition(typeId);
+        const inputMeta = (patch.metadata ?? (cur.metadata ?? {})) as Record<string, unknown>;
+        const m = this.validate(type.fields, inputMeta, (cur.metadata ?? {}) as Record<string, unknown>);
         data.metadata = m.value as Prisma.InputJsonObject;
         data.searchText = m.searchText;
         data.fieldsVersion = type.fieldsVersion;
-        changed.push('metadata');
+        if (patch.metadata !== undefined) changed.push('metadata');
       }
       if (tagIds !== undefined) {
         await tx.documentTag.deleteMany({ where: { documentId: id } });
@@ -298,6 +309,17 @@ export class DocumentsService {
       await this.audit(tx, actor, 'DOCUMENT_UPDATED', 'document', id, meta, { changed });
     });
     return this.get(actor, id);
+  }
+
+  async delete(actor: AuthContext, id: string, meta: RequestMeta): Promise<{ id: string; deleted: boolean }> {
+    await this.db.$transaction(async (tx) => {
+      const doc = await lockDocument(tx, id);
+      if (doc.archiveStatus === 'LEGAL_HOLD') throw new HttpError(409, 'This document is under legal hold', 'CONFLICT');
+      const from = doc.archiveStatus;
+      await tx.document.update({ where: { id }, data: { archiveStatus: 'ARCHIVED', isActive: false, updatedAt: new Date() } });
+      await this.audit(tx, actor, 'DOCUMENT_DELETED', 'document', id, meta, { from, to: 'ARCHIVED' });
+    });
+    return { id, deleted: true };
   }
 
   async setActive(actor: AuthContext, id: string, active: boolean, meta: RequestMeta): Promise<DocumentDetail> {

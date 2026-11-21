@@ -58,6 +58,15 @@ export function registerDocumentTypeRoutes(secure: SecureRouter, _ctx: AppContex
     })
   );
 
+  secure.delete(
+    '/document-types/:id',
+    can('doc_types:manage'),
+    validate({ params: uuidParamSchema }),
+    asyncHandler(async (req, res) => {
+      res.json({ data: await svc.delete(req.auth!, typeId(req), auditContext(req)) });
+    })
+  );
+
   secure.post(
     '/document-types/:id/fields',
     can('doc_types:manage'),

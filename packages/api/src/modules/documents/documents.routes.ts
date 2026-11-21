@@ -81,6 +81,15 @@ export function registerDocumentRoutes(secure: SecureRouter, ctx: AppContext, do
     })
   );
 
+  secure.delete(
+    '/documents/:id',
+    can('documents:manage'),
+    idParam,
+    asyncHandler(async (req, res) => {
+      res.json({ data: await docs.delete(req.auth!, id(req), auditContext(req)) });
+    })
+  );
+
   for (const [path, active] of [['activate', true], ['deactivate', false]] as const) {
     secure.post(
       `/documents/:id/${path}`,

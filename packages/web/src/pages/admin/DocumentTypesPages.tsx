@@ -1,13 +1,15 @@
-import { ArrowDown, ArrowUp, CheckCircle, Eye, FileType2, Plus, Settings } from 'lucide-react';
+import { ArrowDown, ArrowUp, CheckCircle, Eye, FilePlus2, FileText, FileType2, Plus, Settings, Trash2 } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { api, ApiError, errorMessage, fieldErrors } from '../../api';
-import { Badge, Empty, ErrorBanner, Field, InfoBanner, Modal, PageHeader, Spinner, Tabs } from '../../components/ui';
+import { Badge, ConfirmDialog, Empty, ErrorBanner, Field, InfoBanner, Modal, PageHeader, Spinner, Tabs } from '../../components/ui';
 import { MetadataForm } from '../../components/MetadataForm';
 import { gradientFor } from '../../components/Illustrations';
 import { useLoad, useTitle } from '../../hooks';
+import { fmtDateTime } from '../../lib/format';
 import { slugifyKey } from '../../lib/metadata';
-import { FIELD_TYPES, type DocumentTypeDto, type FieldDefinition, type FieldOption, type FieldType, type FieldValidation } from '../../types';
+import { FIELD_TYPES, type DocumentListItem, type DocumentTypeDto, type FieldDefinition, type FieldOption, type FieldType, type FieldValidation, type ListMeta } from '../../types';
 
 const TYPE_LABEL: Record<FieldType, string> = {
   TEXT: 'Text (single-line)',
@@ -77,9 +79,12 @@ export function AdminDocumentTypesPage() {
                     {active.length === 0 && <span className="text-[11px] text-muted-foreground">No custom fields</span>}
                   </span>
                   <span className="mt-auto flex items-center justify-between border-t pt-3 text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <FileText className="size-3.5 text-primary" aria-hidden="true" />
+                      <strong className="text-foreground tabular-nums">{t.documentCount ?? 0}</strong> doc{(t.documentCount ?? 0) === 1 ? '' : 's'}
+                    </span>
                     <span><strong className="text-foreground tabular-nums">{active.length}</strong> field{active.length === 1 ? '' : 's'}</span>
                     <span>Up to <strong className="text-foreground tabular-nums">{t.maxFileSizeMb} MB</strong></span>
-                    <span>{t.retentionYears ? `${t.retentionYears} yr retention` : 'Kept indefinitely'}</span>
                   </span>
                 </span>
               </Link>
@@ -150,7 +155,15 @@ export function DocumentTypeBuilderPage() {
   const type = useLoad(async () => (await api.get<DocumentTypeDto>(`/document-types/${id}`)).data, [id]);
   const t = type.data;
   useTitle(t ? `${t.name} · Schema Builder` : 'Document type');
-  const [tab, setTab] = useState<'builder' | 'preview' | 'settings'>('builder');
+  const [tab, setTab] = useState<'documents' | 'builder' | 'preview' | 'settings'>('documents');
+  const [deletingDoc, setDeletingDoc] = useState<DocumentListItem | null>(null);
+  const typeDocs = useLoad(
+    async () => {
+      const r = await api.get<DocumentListItem[]>('/documents', { typeId: id, limit: 100 });
+      return { rows: r.data, meta: r.meta as ListMeta };
+    },
+    [id]
+  );
   const [editing, setEditing] = useState<FieldDefinition | 'new' | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -190,7 +203,10 @@ export function DocumentTypeBuilderPage() {
         <Link className="btn" to="/admin/document-types">
           All types
         </Link>
-        <button className="btn primary" onClick={() => setEditing('new')}>
+        <Link className="btn primary" to={`/documents/new?typeId=${t.id}`}>
+          <FilePlus2 className="size-4" /> Upload document
+        </Link>
+        <button className="btn" onClick={() => { setTab('builder'); setEditing('new'); }}>
           <Plus className="size-4" /> Add field
         </button>
       </PageHeader>
@@ -201,14 +217,105 @@ export function DocumentTypeBuilderPage() {
       <div className="mb-4">
         <Tabs
           tabs={[
+            { id: 'documents', label: `Documents (${typeDocs.data?.meta.total ?? t.documentCount ?? 0})` },
             { id: 'builder', label: `Fields (${fields.length})` },
             { id: 'preview', label: 'Live Form Preview' },
             { id: 'settings', label: 'Type Settings' },
           ]}
           value={tab}
-          onChange={(v) => setTab(v as 'builder' | 'preview' | 'settings')}
+          onChange={(v) => setTab(v as 'documents' | 'builder' | 'preview' | 'settings')}
         />
       </div>
+
+      {tab === 'documents' && (
+        <div className="card">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <h2 className="!mb-0">{t.name} Documents</h2>
+              <p className="muted text-xs mt-1">
+                All documents categorized under this document type.
+              </p>
+            </div>
+            <Link className="btn small primary" to={`/documents/new?typeId=${t.id}`}>
+              <FilePlus2 className="size-3.5" /> Upload document
+            </Link>
+          </div>
+
+          {typeDocs.loading && !typeDocs.data && <Spinner />}
+          {typeDocs.error != null && <ErrorBanner error={typeDocs.error} onRetry={typeDocs.reload} />}
+
+          {typeDocs.data && typeDocs.data.rows.length === 0 && (
+            <Empty
+              icon={FileText}
+              title={`No ${t.name} documents found`}
+              action={
+                <Link className="btn primary" to={`/documents/new?typeId=${t.id}`}>
+                  <FilePlus2 className="size-4" /> Upload {t.name}
+                </Link>
+              }
+            >
+              No documents have been uploaded under this type yet.
+            </Empty>
+          )}
+
+          {typeDocs.data && typeDocs.data.rows.length > 0 && (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Version</th>
+                    <th>Tags</th>
+                    <th>Status</th>
+                    <th>Updated</th>
+                    <th className="text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {typeDocs.data.rows.map((d) => (
+                    <tr key={d.id}>
+                      <td>
+                        <Link to={`/documents/${d.id}`} className="flex items-center gap-3 font-medium text-foreground no-underline hover:text-primary">
+                          <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary">
+                            <FileText className="size-4" aria-hidden="true" />
+                          </span>
+                          <span className="max-w-[320px] truncate">{d.name}</span>
+                        </Link>
+                      </td>
+                      <td className="whitespace-nowrap">
+                        {d.currentVersionNumber ? <span className="mono !text-[12px]">v{d.currentVersionNumber}</span> : <span className="muted">—</span>}
+                      </td>
+                      <td>
+                        {d.tags.length ? d.tags.map((tag) => <span className="tag" key={tag.id}>{tag.name}</span>) : <span className="muted">—</span>}
+                      </td>
+                      <td className="whitespace-nowrap">
+                        <div className="flex gap-1.5">
+                          <Badge tone={d.isActive ? 'ok' : 'neutral'}>{d.isActive ? 'Active' : 'Inactive'}</Badge>
+                          {d.archiveStatus !== 'LIVE' && <Badge tone="warn">{d.archiveStatus === 'ARCHIVED' ? 'Archived' : 'Legal hold'}</Badge>}
+                        </div>
+                      </td>
+                      <td className="muted whitespace-nowrap">{fmtDateTime(d.updatedAt)}</td>
+                      <td className="text-right whitespace-nowrap">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <Link to={`/documents/${d.id}`} className="btn small">View</Link>
+                          <button
+                            type="button"
+                            className="btn ghost icon small text-muted-foreground hover:text-danger"
+                            title="Delete document"
+                            onClick={() => setDeletingDoc(d)}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {tab === 'builder' && (
         <div className="card">
@@ -335,11 +442,33 @@ export function DocumentTypeBuilderPage() {
           }}
         />
       )}
+
+      {deletingDoc && (
+        <ConfirmDialog
+          title="Delete document?"
+          message={
+            <span>
+              Are you sure you want to delete <strong>{deletingDoc.name}</strong>? It will be archived and hidden from active documents.
+            </span>
+          }
+          confirmLabel="Delete document"
+          danger
+          onClose={() => setDeletingDoc(null)}
+          onConfirm={async () => {
+            await api.del(`/documents/${deletingDoc.id}`);
+            toast.success('Document deleted');
+            typeDocs.reload();
+            type.reload();
+          }}
+        />
+      )}
     </>
   );
 }
 
 function TypeSettings({ type, onSaved }: { type: DocumentTypeDto; onSaved: (t: DocumentTypeDto) => void }) {
+  const nav = useNavigate();
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [name, setName] = useState(type.name);
   const [description, setDescription] = useState(type.description ?? '');
   const [maxMb, setMaxMb] = useState(String(type.maxFileSizeMb));
@@ -372,36 +501,79 @@ function TypeSettings({ type, onSaved }: { type: DocumentTypeDto; onSaved: (t: D
   }
 
   return (
-    <form className="card stack gap-4" onSubmit={save}>
-      <h2>Type Settings</h2>
-      {error && <ErrorBanner message={error} />}
-      <div className="form-grid">
-        <Field label="Name" required error={errors.name}>
-          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={100} required />
-        </Field>
-        <Field label="Description" error={errors.description}>
-          <input value={description} onChange={(e) => setDescription(e.target.value)} maxLength={500} />
-        </Field>
-        <Field label="Largest file allowed (MB)" error={errors.maxFileSizeMb}>
-          <input type="number" min={1} max={100} value={maxMb} onChange={(e) => setMaxMb(e.target.value)} />
-        </Field>
-        <Field label="Keep for (years)" error={errors.retentionYears} help="Leave empty for indefinite retention.">
-          <input type="number" min={0} max={100} value={retention} onChange={(e) => setRetention(e.target.value)} />
-        </Field>
+    <div className="stack gap-6">
+      <form className="card stack gap-4" onSubmit={save}>
+        <h2>Type Settings</h2>
+        {error && <ErrorBanner message={error} />}
+        <div className="form-grid">
+          <Field label="Name" required error={errors.name}>
+            <input value={name} onChange={(e) => setName(e.target.value)} maxLength={100} required />
+          </Field>
+          <Field label="Description" error={errors.description}>
+            <input value={description} onChange={(e) => setDescription(e.target.value)} maxLength={500} />
+          </Field>
+          <Field label="Largest file allowed (MB)" error={errors.maxFileSizeMb}>
+            <input type="number" min={1} max={100} value={maxMb} onChange={(e) => setMaxMb(e.target.value)} />
+          </Field>
+          <Field label="Keep for (years)" error={errors.retentionYears} help="Leave empty for indefinite retention.">
+            <input type="number" min={0} max={100} value={retention} onChange={(e) => setRetention(e.target.value)} />
+          </Field>
+        </div>
+        <label className="check">
+          <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
+          <span>Active (allow new document uploads of this type)</span>
+        </label>
+        <p className="muted text-xs">
+          Key: <code className="mono">{type.key}</code> (immutable). Allowed file type: PDF.
+        </p>
+        <div className="row end">
+          <button className="btn primary" disabled={busy}>
+            {busy ? 'Saving…' : 'Save settings'}
+          </button>
+        </div>
+      </form>
+
+      <div className="card border-danger/30 bg-danger/5">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h3 className="text-base font-semibold text-danger">Delete document type</h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              {(type.documentCount ?? 0) > 0
+                ? `Cannot delete this document type because it contains ${type.documentCount} document(s). Reassign or delete those documents first.`
+                : 'Permanently remove this document type and all of its custom schema fields. This cannot be undone.'}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn danger"
+            disabled={(type.documentCount ?? 0) > 0 || busy}
+            onClick={() => setShowDeleteConfirm(true)}
+          >
+            <Trash2 className="size-4" />
+            Delete document type
+          </button>
+        </div>
       </div>
-      <label className="check">
-        <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
-        <span>Active (allow new document uploads of this type)</span>
-      </label>
-      <p className="muted text-xs">
-        Key: <code className="mono">{type.key}</code> (immutable). Allowed file type: PDF.
-      </p>
-      <div className="row end">
-        <button className="btn primary" disabled={busy}>
-          {busy ? 'Saving…' : 'Save settings'}
-        </button>
-      </div>
-    </form>
+
+      {showDeleteConfirm && (
+        <ConfirmDialog
+          title="Delete document type?"
+          message={
+            <span>
+              Are you sure you want to delete <strong>{type.name}</strong>? All configuration and metadata schema definitions for this type will be permanently removed.
+            </span>
+          }
+          confirmLabel="Delete document type"
+          danger
+          onClose={() => setShowDeleteConfirm(false)}
+          onConfirm={async () => {
+            await api.del(`/document-types/${type.id}`);
+            toast.success('Document type deleted');
+            nav('/admin/document-types');
+          }}
+        />
+      )}
+    </div>
   );
 }
 

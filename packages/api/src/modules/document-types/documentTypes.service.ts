@@ -34,7 +34,9 @@ export interface DocumentTypesConfig {
   REAUTH_MAX_AGE_SECONDS: number;
 }
 
-type TypeRow = Prisma.DocumentTypeGetPayload<{ include: { fields: true } }>;
+type TypeRow = Prisma.DocumentTypeGetPayload<{ include: { fields: true } }> & {
+  _count?: { documents: number };
+};
 type FieldRow = Prisma.DocumentTypeFieldGetPayload<object>;
 type Tx = Prisma.TransactionClient;
 
@@ -73,6 +75,7 @@ export function toTypeDto(t: TypeRow, opts: { onlyActiveFields: boolean }): Docu
     fieldsVersion: t.fieldsVersion,
     fields,
     reviewFieldsConfig: t.reviewFieldsConfig ? parseReviewFieldsConfig(t.reviewFieldsConfig) : null,
+    documentCount: t._count?.documents ?? undefined,
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
   };
@@ -107,7 +110,10 @@ export class DocumentTypesService {
   }
 
   private async load(id: string, db: Tx | PrismaClient = this.db): Promise<TypeRow> {
-    const t = await db.documentType.findUnique({ where: { id }, include: { fields: true } });
+    const t = await db.documentType.findUnique({
+      where: { id },
+      include: { fields: true, _count: { select: { documents: true } } },
+    });
     if (!t) throw new HttpError(404, 'Document type not found');
     return t;
   }
@@ -116,7 +122,7 @@ export class DocumentTypesService {
     const onlyActive = !canManage || activeOnly === true;
     const rows = await this.db.documentType.findMany({
       where: onlyActive ? { isActive: true } : {},
-      include: { fields: true },
+      include: { fields: true, _count: { select: { documents: true } } },
       orderBy: [{ name: 'asc' }],
     });
     return rows.map((r) => toTypeDto(r, { onlyActiveFields: !canManage }));
@@ -360,5 +366,23 @@ export class DocumentTypesService {
       return this.load(typeId, tx);
     });
     return toTypeDto(updated, { onlyActiveFields: false });
+  }
+
+  async delete(actor: AuthContext, typeId: string, meta: RequestMeta): Promise<{ id: string; deleted: boolean }> {
+    const current = await this.load(typeId);
+    const count = await this.usage.countForType(typeId);
+    if (count > 0) {
+      throw new HttpError(
+        409,
+        `Cannot delete document type "${current.name}" because it still has ${count} document(s). Delete or reassign those documents first, or deactivate this type.`,
+        'CONFLICT'
+      );
+    }
+    await this.db.$transaction(async (tx) => {
+      await tx.documentTypeField.deleteMany({ where: { documentTypeId: typeId } });
+      await tx.documentType.delete({ where: { id: typeId } });
+      await this.audit(tx, actor, 'DOCUMENT_TYPE_DELETED', typeId, meta, { key: current.key, name: current.name });
+    });
+    return { id: typeId, deleted: true };
   }
 }
