@@ -6,8 +6,8 @@ import { Badge, Empty, ErrorBanner, InfoBanner, PageHeader, Spinner } from '../.
 import { useLoad, useTitle } from '../../hooks';
 import { fmtDateTime } from '../../lib/format';
 
-/** Where the signature lands when the form is left alone: one inch in from the bottom-left corner of page 1. */
-const DEFAULTS = { pageNumber: '1', xPt: '72', yPt: '72', widthPt: '150', heightPt: '60' };
+/** Where the signature lands when the form is left alone: Page 2 signature block for DeCircle Solar CEO. */
+const DEFAULTS = { pageNumber: '2', xPt: '62', yPt: '118', widthPt: '135', heightPt: '48' };
 
 /**
  * The pre-approved signature that staff stamp onto a document as the last step of a client review. An administrator
@@ -82,6 +82,7 @@ export function AdminSignaturesPage() {
       <InfoBanner>
         This is the signature reviewers stamp onto a document as the final step before it goes back to the client. Upload it as a JPG. Positions are in points
         measured from the <strong>bottom-left</strong> corner of the page (72 points = 1 inch; an A4 page is about 595 × 842).
+        For standard NDAs, the DeCircle Solar CEO signature sits on <strong>Page 2</strong> (from left: <strong>62 pt</strong>, from bottom: <strong>118 pt</strong>, 135 × 48 pt).
       </InfoBanner>
 
       {error && <ErrorBanner message={error} />}

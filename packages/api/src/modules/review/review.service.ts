@@ -476,7 +476,7 @@ export class ReviewService {
       if (positions && positions.length > 0 && c.fieldKey) {
         for (const p of positions) {
           const text = p.template ? p.template.replace(`{{${c.fieldKey}}}`, value) : value;
-          out.push({ pageNumber: p.pageNumber, xPct: p.xPct, yPct: p.yPct, wPct: p.wPct, hPct: p.hPct, text });
+          out.push({ pageNumber: p.pageNumber, xPct: p.xPct, yPct: p.yPct, wPct: p.wPct, hPct: p.hPct, text, bold: p.bold });
         }
       } else {
         out.push({ pageNumber: c.pageNumber, xPct: c.xPct, yPct: c.yPct, wPct: c.boxWPct ?? 0, hPct: c.boxHPct ?? 0, text: value });

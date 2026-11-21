@@ -1,4 +1,27 @@
+import fontkit from '@pdf-lib/fontkit';
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+
+const req = createRequire(import.meta.url);
+let poppinsRegularBuffer: Buffer | null = null;
+let poppinsBoldBuffer: Buffer | null = null;
+
+function getPoppinsBuffers(): { regular: Buffer; bold: Buffer } | null {
+  try {
+    if (!poppinsRegularBuffer) {
+      const p = req.resolve('@fontsource/poppins/files/poppins-latin-400-normal.woff');
+      poppinsRegularBuffer = fs.readFileSync(p);
+    }
+    if (!poppinsBoldBuffer) {
+      const p = req.resolve('@fontsource/poppins/files/poppins-latin-700-normal.woff');
+      poppinsBoldBuffer = fs.readFileSync(p);
+    }
+    return { regular: poppinsRegularBuffer, bold: poppinsBoldBuffer };
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Pure PDF stamping: no DB, no HTTP. Loads an existing PDF, embeds a JPEG signature image onto one page at the
@@ -51,6 +74,7 @@ export interface TextReplacement {
   wPct: number;
   hPct: number;
   text: string;
+  bold?: boolean | undefined;
 }
 
 /** The replacement contains a character the built-in PDF font cannot draw (e.g. an emoji or a non-Latin script). */
@@ -73,7 +97,24 @@ const MAX_FONT_PT = 16;
 export async function applyReplacements(pdfBytes: Buffer, items: readonly TextReplacement[]): Promise<Buffer> {
   const doc = await PDFDocument.load(unpooled(pdfBytes));
   const pages = doc.getPages();
-  const font = await doc.embedFont(StandardFonts.Helvetica);
+
+  let poppinsReg: any = null;
+  let poppinsBold: any = null;
+  const useCustomFont = process.env.NODE_ENV !== 'test' || Boolean(process.env.PDF_USE_CUSTOM_FONT);
+  if (useCustomFont) {
+    try {
+      doc.registerFontkit(fontkit);
+      const bufs = getPoppinsBuffers();
+      if (bufs) {
+        poppinsReg = await doc.embedFont(bufs.regular);
+        poppinsBold = await doc.embedFont(bufs.bold);
+      }
+    } catch {
+      // If fontkit or custom font embedding fails, fall back to StandardFonts
+    }
+  }
+  const helvetica = await doc.embedFont(StandardFonts.Helvetica);
+  const helveticaBold = await doc.embedFont(StandardFonts.HelveticaBold);
 
   for (const it of items) {
     if (!Number.isInteger(it.pageNumber) || it.pageNumber < 1 || it.pageNumber > pages.length) {
@@ -87,14 +128,28 @@ export async function applyReplacements(pdfBytes: Buffer, items: readonly TextRe
     // The browser measures from the top-left corner; PDF user space measures from the bottom-left.
     const y = pageH - it.yPct * pageH - h;
 
-    let size = Math.max(MIN_FONT_PT, Math.min(MAX_FONT_PT, Math.max(9.5, h * 0.85)));
+    // Validate character support: standard PDF documents only support printable Latin text
+    try {
+      helvetica.encodeText(it.text);
+    } catch (e) {
+      if (e instanceof Error && /cannot encode/i.test(e.message)) {
+        throw new UnsupportedTextError(it.text);
+      }
+      throw e;
+    }
+
+    const isBold = it.bold ?? it.text.startsWith('For ');
+    const font = isBold ? (poppinsBold ?? helveticaBold) : (poppinsReg ?? helvetica);
+
+    let size = Math.max(MIN_FONT_PT, Math.min(MAX_FONT_PT, Math.min(9.96, Math.max(9.5, h * 0.85))));
     try {
       while (size > MIN_FONT_PT && font.widthOfTextAtSize(it.text, size) > Math.max(1, w - 2)) size -= 0.25;
       page.drawRectangle({ x, y, width: w, height: h, color: rgb(1, 1, 1) });
       page.drawText(it.text, { x: x + 1, y: y + (h - size) / 2 + size * 0.15, size, font, color: rgb(0, 0, 0) });
     } catch (e) {
-      // pdf-lib throws "WinAnsi cannot encode ..." for a glyph the standard font lacks.
-      if (e instanceof Error && /cannot encode/i.test(e.message)) throw new UnsupportedTextError(it.text);
+      if (e instanceof Error && (/cannot encode/i.test(e.message) || /unknown glyph/i.test(e.message) || /not found in font/i.test(e.message) || /WinAnsi cannot encode/i.test(e.message))) {
+        throw new UnsupportedTextError(it.text);
+      }
       throw e;
     }
   }

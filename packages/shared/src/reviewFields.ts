@@ -19,6 +19,9 @@ export const reviewFieldPositionSchema = z.strictObject({
   wPct: z.number().gt(0).max(1),
   hPct: z.number().gt(0).max(1),
   template: z.string().trim().min(1).max(2000).optional(),
+  /** Set when this exact spot is bold in the original document (e.g. a "For {{name}}" signing-block heading) --
+   * read directly off the template's own content stream, never guessed from the text. */
+  bold: z.boolean().optional(),
 });
 export type ReviewFieldPosition = z.output<typeof reviewFieldPositionSchema>;
 
