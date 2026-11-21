@@ -247,6 +247,17 @@ export function ReviewLinkPage() {
         <div className="grid items-start gap-6 lg:grid-cols-[1fr_420px]">
           <section className="order-2 lg:order-1 lg:sticky lg:top-24">
             <div className="rounded-2xl border bg-card p-4 shadow-xs">
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <span className="text-sm font-semibold">Document preview</span>
+                <a
+                  className="btn small"
+                  href={`/api/v1/public/review/${encodeURIComponent(token)}/content`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  View full PDF
+                </a>
+              </div>
               {pdfError && <ErrorBanner message={pdfError} />}
               {!pdfUrl && !pdfError && (
                 <div className="py-16">
