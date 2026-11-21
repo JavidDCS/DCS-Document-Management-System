@@ -22,6 +22,10 @@ export const reviewFieldPositionSchema = z.strictObject({
   /** Set when this exact spot is bold in the original document (e.g. a "For {{name}}" signing-block heading) --
    * read directly off the template's own content stream, never guessed from the text. */
   bold: z.boolean().optional(),
+  /** The covered text's own point size, read directly off the template's content stream (its `Tf` operator) --
+   * never derived from `hPct`, which is sized generously for whiteout coverage, not for font-size estimation.
+   * Falls back to a sensible default when not set. */
+  fontSizePt: z.number().gt(0).max(72).optional(),
 });
 export type ReviewFieldPosition = z.output<typeof reviewFieldPositionSchema>;
 

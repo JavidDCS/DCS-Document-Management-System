@@ -75,6 +75,9 @@ export interface TextReplacement {
   hPct: number;
   text: string;
   bold?: boolean | undefined;
+  /** The covered text's own point size (from the template's `Tf` operator) -- NOT derived from `hPct`, which is
+   * sized generously for whiteout coverage, not for font-size estimation. Falls back to a sensible default. */
+  fontSizePt?: number | undefined;
 }
 
 /** The replacement contains a character the built-in PDF font cannot draw (e.g. an emoji or a non-Latin script). */
@@ -92,7 +95,17 @@ const MAX_FONT_PT = 16;
  * Applies suggested text changes as an overlay: each box is painted white and the new text is drawn inside it. The
  * original text is NOT removed from the PDF's content stream -- it is covered, which is what a "whiteout" edit is.
  * That is right for a small value edit (a name, a price, a period) on a white background; it is not a way to
- * redact. The font is Helvetica, shrunk to fit the box.
+ * redact.
+ *
+ * Drawn in Poppins (the app's own brand font) when it can be embedded, falling back to Helvetica otherwise. Text
+ * is always validated against Helvetica's WinAnsi encoding first, even when Poppins is what actually gets drawn:
+ * a custom fontkit-embedded font silently draws a blank/notdef glyph for a character it can't map (it does not
+ * throw), so Helvetica's narrower, throwing encoder is what actually catches an unsupported character.
+ *
+ * Tests draw with Helvetica only (`PDF_USE_CUSTOM_FONT` unset in the test env): a custom embedded font is written
+ * into the PDF as 2-byte glyph-index (CID) codes, not literal character bytes, so a test asserting the drawn text
+ * by searching the raw content stream for it (`pdfContainsText`) would never find it. Position, sizing and
+ * every other behaviour is identical either way -- only the glyph encoding differs.
  */
 export async function applyReplacements(pdfBytes: Buffer, items: readonly TextReplacement[]): Promise<Buffer> {
   const doc = await PDFDocument.load(unpooled(pdfBytes));
@@ -125,10 +138,11 @@ export async function applyReplacements(pdfBytes: Buffer, items: readonly TextRe
     const w = it.wPct * pageW;
     const h = it.hPct * pageH;
     const x = it.xPct * pageW;
-    // The browser measures from the top-left corner; PDF user space measures from the bottom-left.
+    // The browser measures from the top-left corner; PDF user space measures from the bottom-left. `h` is the
+    // covered text's own ascender-to-baseline height, so this `y` is exactly that text's own baseline.
     const y = pageH - it.yPct * pageH - h;
 
-    // Validate character support: standard PDF documents only support printable Latin text
+    // Validate character support against Helvetica's WinAnsi encoding -- see the function comment above for why.
     try {
       helvetica.encodeText(it.text);
     } catch (e) {
@@ -138,14 +152,22 @@ export async function applyReplacements(pdfBytes: Buffer, items: readonly TextRe
       throw e;
     }
 
-    const isBold = it.bold ?? it.text.startsWith('For ');
+    const isBold = it.bold ?? false;
     const font = isBold ? (poppinsBold ?? helveticaBold) : (poppinsReg ?? helvetica);
 
-    let size = Math.max(MIN_FONT_PT, Math.min(MAX_FONT_PT, Math.min(9.96, Math.max(9.5, h * 0.85))));
+    // The covered text's own size when the position states it (precise -- read off the template's content
+    // stream); otherwise a clamped estimate from `hPct`. Either way, shrunk further only if this particular
+    // value is too wide for its box.
+    let size = it.fontSizePt ?? Math.max(MIN_FONT_PT, Math.min(MAX_FONT_PT, h));
+    // A small fixed margin around the measured box -- just enough for a stray descender or antialiasing at the
+    // edge. `hPct` is already sized generously for coverage, so this stays small and fixed rather than scaling
+    // with `h` (which, for a bold heading's wider box, would otherwise pad enough to bleed into the line below).
+    const padY = 1.5;
+    const padRight = 3;
     try {
       while (size > MIN_FONT_PT && font.widthOfTextAtSize(it.text, size) > Math.max(1, w - 2)) size -= 0.25;
-      page.drawRectangle({ x, y, width: w, height: h, color: rgb(1, 1, 1) });
-      page.drawText(it.text, { x: x + 1, y: y + (h - size) / 2 + size * 0.15, size, font, color: rgb(0, 0, 0) });
+      page.drawRectangle({ x: x - 1, y: y - padY, width: w + padRight, height: h + padY * 2, color: rgb(1, 1, 1) });
+      page.drawText(it.text, { x: x + 1, y, size, font, color: rgb(0, 0, 0) });
     } catch (e) {
       if (e instanceof Error && (/cannot encode/i.test(e.message) || /unknown glyph/i.test(e.message) || /not found in font/i.test(e.message) || /WinAnsi cannot encode/i.test(e.message))) {
         throw new UnsupportedTextError(it.text);

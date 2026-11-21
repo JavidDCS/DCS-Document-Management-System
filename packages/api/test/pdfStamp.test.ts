@@ -60,10 +60,11 @@ describe('pdfStamp.service', () => {
       // the content stream for the rectangle's y coordinate.
       const edited = await applyReplacements(await makeFakePdf(1), [{ pageNumber: 1, xPct: 0, yPct: 0, wPct: 0.5, hPct: 0.1, text: 'x' }]);
       const stream = await pageContent(edited);
-      // 792 (page height) - 0 - 79.2 (box height) = 712.8: the box's bottom edge sits 79.2pt below the top of the page.
-      expect(stream).toMatch(/1 0 0 1 0 712\.8 cm/);
-      // ...and it is 306 (half of 612) wide and 79.2 (a tenth of 792) tall.
-      expect(stream).toMatch(/306 79\.2 l/);
+      // 792 (page height) - 0 - 79.2 (box height) = 712.8: the box's bottom edge sits 79.2pt below the top of the
+      // page -- then padded out by a small fixed margin (not scaled by box size) for a stray descender or edge slop.
+      expect(stream).toMatch(/1 0 0 1 -1 711\.3/);
+      // ...starting from 306 (half of 612) wide and 79.2 (a tenth of 792) tall, plus that same small margin.
+      expect(stream).toMatch(/309 82\.2 l/);
     });
 
     it('rejects a page beyond the document, and text the standard font cannot draw', async () => {

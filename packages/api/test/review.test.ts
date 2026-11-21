@@ -202,7 +202,7 @@ describe.skipIf(skipDb)('external document review: share links, comments, accept
           placeholder: 'e.g. Acme Solar Pvt Ltd',
           positions: [
             { pageNumber: 1, xPct: 0.0907, yPct: 0.3082, wPct: 0.818, hPct: 0.0118, template: '{{counterparty_legal_name}}, a company / LLP / proprietorship incorporated under the laws of' },
-            { pageNumber: 2, xPct: 0.5135, yPct: 0.7283, wPct: 0.2213, hPct: 0.0118, template: 'For {{counterparty_legal_name}}' },
+            { pageNumber: 2, xPct: 0.5135, yPct: 0.7283, wPct: 0.2213, hPct: 0.0118, template: 'For {{counterparty_legal_name}}', bold: true },
           ],
         },
         {
