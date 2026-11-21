@@ -10,6 +10,7 @@ const baseInfo: PublicReviewLinkInfo = {
   expiresAt: '2026-12-01T00:00:00.000Z',
   status: 'ACTIVE',
   comments: [],
+  editableFields: [],
 };
 
 describe('classifyReviewLinkState', () => {

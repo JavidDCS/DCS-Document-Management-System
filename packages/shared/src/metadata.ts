@@ -1,4 +1,5 @@
 import { z, type ZodType } from 'zod';
+import { reviewFieldsConfigSchema, type ReviewFieldDef } from './reviewFields.js';
 
 /**
  * Dynamic metadata: admins define fields per document type at runtime; a Zod schema is built from the active
@@ -319,6 +320,9 @@ export const createDocumentTypeSchema = z.strictObject({
   retentionYears: typeShape.retentionYears.optional(),
   /** Fields may be defined together with the type, or added later one by one. */
   fields: z.array(createFieldSchema).max(MAX_FIELDS_PER_TYPE).optional(),
+  /** This type's fixed client-review fields (reviewFields.ts's runtime counterpart) -- optional; a type with
+   * none configured just has no fixed fields, and the client's freeform-comment fallback still works. */
+  reviewFieldsConfig: reviewFieldsConfigSchema.optional(),
 });
 export type CreateDocumentTypeInput = z.output<typeof createDocumentTypeSchema>;
 
@@ -329,6 +333,7 @@ export const updateDocumentTypeSchema = z
     maxFileSizeMb: typeShape.maxFileSizeMb.optional(),
     retentionYears: typeShape.retentionYears.optional(),
     isActive: typeShape.isActive.optional(),
+    reviewFieldsConfig: reviewFieldsConfigSchema.optional(),
   })
   .refine((v) => Object.keys(v).length > 0, 'Provide at least one property to change');
 export type UpdateDocumentTypeInput = z.output<typeof updateDocumentTypeSchema>;
@@ -348,6 +353,8 @@ export interface DocumentTypeDto {
   isActive: boolean;
   fieldsVersion: number;
   fields: FieldDefinition[];
+  /** This type's fixed client-review fields, if any have been configured -- see reviewFields.ts. */
+  reviewFieldsConfig: ReviewFieldDef[] | null;
   createdAt: string;
   updatedAt: string;
 }

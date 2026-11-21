@@ -7,6 +7,7 @@ import {
   incorporateChangesSchema,
   reviewCommentDecisionSchema,
   stampSignatureSchema,
+  submitReviewFieldsBatchSchema,
   uuidParamSchema,
 } from '@dcs-docs/shared';
 import type { AppContext } from '../../app.js';
@@ -181,6 +182,9 @@ export function registerReviewRoutes(secure: SecureRouter, ctx: AppContext, revi
     })
   );
 
+  // Freeform suggested changes are gone at the API layer, not just hidden in the UI: this route (and its batch
+  // sibling below) now only accepts kind: 'COMMENT' -- the 1% free-text fallback. A fixed named field goes
+  // through /public/review/:token/fields instead, which is the only path that can still produce a CHANGE.
   secure.post(
     '/public/review/:token/comments',
     PUBLIC('possession of the random token is the only credential, like a password-reset link'),
@@ -188,7 +192,11 @@ export function registerReviewRoutes(secure: SecureRouter, ctx: AppContext, revi
     validate({ params: tokenParamSchema, body: createReviewCommentSchema }),
     asyncHandler(async (req, res) => {
       const { token } = req.params as unknown as z.infer<typeof tokenParamSchema>;
-      const created = await review.submitComment(token, req.body as z.infer<typeof createReviewCommentSchema>, auditContext(req));
+      const body = req.body as z.infer<typeof createReviewCommentSchema>;
+      if (body.kind === 'CHANGE') {
+        throw new HttpError(400, 'Suggested changes are now submitted through the fixed field form, not a freeform box', 'VALIDATION_ERROR', [{ path: 'kind', message: 'Only a comment can be submitted here' }]);
+      }
+      const created = await review.submitComment(token, body, auditContext(req));
       res.status(201).json({ data: created });
     })
   );
@@ -201,7 +209,23 @@ export function registerReviewRoutes(secure: SecureRouter, ctx: AppContext, revi
     asyncHandler(async (req, res) => {
       const { token } = req.params as unknown as z.infer<typeof tokenParamSchema>;
       const { items } = req.body as z.infer<typeof createReviewCommentsBatchSchema>;
+      if (items.some((i) => i.kind === 'CHANGE')) {
+        throw new HttpError(400, 'Suggested changes are now submitted through the fixed field form, not a freeform box', 'VALIDATION_ERROR', [{ path: 'items', message: 'Only comments can be submitted here' }]);
+      }
       const created = await review.submitComments(token, items, auditContext(req));
+      res.status(201).json({ data: created });
+    })
+  );
+
+  secure.post(
+    '/public/review/:token/fields',
+    PUBLIC('possession of the random token is the only credential, like a password-reset link'),
+    limiters.publicComment,
+    validate({ params: tokenParamSchema, body: submitReviewFieldsBatchSchema }),
+    asyncHandler(async (req, res) => {
+      const { token } = req.params as unknown as z.infer<typeof tokenParamSchema>;
+      const { items } = req.body as z.infer<typeof submitReviewFieldsBatchSchema>;
+      const created = await review.submitReviewFields(token, items, auditContext(req));
       res.status(201).json({ data: created });
     })
   );

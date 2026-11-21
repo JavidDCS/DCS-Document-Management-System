@@ -2,6 +2,7 @@ import { Prisma, type PrismaClient } from '@prisma/client';
 import {
   checkFieldConfig,
   MAX_FIELDS_PER_TYPE,
+  parseReviewFieldsConfig,
   slugifyKey,
   type CreateDocumentTypeInput,
   type CreateFieldInput,
@@ -71,6 +72,7 @@ export function toTypeDto(t: TypeRow, opts: { onlyActiveFields: boolean }): Docu
     isActive: t.isActive,
     fieldsVersion: t.fieldsVersion,
     fields,
+    reviewFieldsConfig: t.reviewFieldsConfig ? parseReviewFieldsConfig(t.reviewFieldsConfig) : null,
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
   };
@@ -182,6 +184,7 @@ export class DocumentTypesService {
             description: input.description ?? null,
             ...(input.maxFileSizeMb !== undefined ? { maxFileSizeMb: input.maxFileSizeMb } : {}),
             retentionYears: input.retentionYears ?? null,
+            reviewFieldsConfig: jsonOrNull(input.reviewFieldsConfig),
             createdById: actor.userId,
             updatedById: actor.userId,
             fields: { create: fields.map((f, i) => this.fieldCreateData(f, i)) },
@@ -211,6 +214,8 @@ export class DocumentTypesService {
     for (const k of ['name', 'description', 'maxFileSizeMb', 'retentionYears', 'isActive'] as const) {
       if (input[k] !== undefined && input[k] !== current[k]) changes[k] = { from: current[k], to: input[k] };
     }
+    const changesReviewFields = input.reviewFieldsConfig !== undefined && !same(input.reviewFieldsConfig, current.reviewFieldsConfig);
+    if (changesReviewFields) changes.reviewFieldsConfig = { from: current.reviewFieldsConfig, to: input.reviewFieldsConfig };
     if (Object.keys(changes).length === 0) return toTypeDto(current, { onlyActiveFields: false });
 
     try {
@@ -223,6 +228,7 @@ export class DocumentTypesService {
             ...(input.maxFileSizeMb !== undefined ? { maxFileSizeMb: input.maxFileSizeMb } : {}),
             ...(input.retentionYears !== undefined ? { retentionYears: input.retentionYears } : {}),
             ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
+            ...(changesReviewFields ? { reviewFieldsConfig: jsonOrNull(input.reviewFieldsConfig) } : {}),
             updatedById: actor.userId,
           },
           include: { fields: true },

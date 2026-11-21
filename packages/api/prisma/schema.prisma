@@ -177,6 +177,9 @@ model DocumentType {
   retentionYears   Int?     @map("retention_years")
   isActive         Boolean  @default(true) @map("is_active")
   fieldsVersion    Int      @default(1) @map("fields_version") // incremented on every field change
+  /// This type's fixed client-review fields (reviewFields.ts's ReviewFieldDef[]), if any are configured --
+  /// set at runtime through the document-types admin API, never hardcoded by document type in source.
+  reviewFieldsConfig Json?  @map("review_fields_config")
   createdById      String?  @map("created_by_id") @db.Uuid
   updatedById      String?  @map("updated_by_id") @db.Uuid
   createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
@@ -549,6 +552,13 @@ model DocumentReviewComment {
   /// Set only if staff adjusted the client's wording at accept time; when present, this is what actually gets
   /// written into the PDF instead of `replacementText` -- the client's own submission is never overwritten.
   editedReplacementText String? @map("edited_replacement_text")
+  /// Set only when this CHANGE came from the fixed named-field form (reviewFields.ts), not a legacy freeform box.
+  /// Null for the free-text "1% fallback" COMMENT and for any older freeform CHANGE rows.
+  fieldKey           String?   @map("field_key")
+  /// Snapshotted at submission time from reviewFields.ts: every page/x/y/w/h box this field's value gets stamped
+  /// into (a field may appear more than once in the document). Null means "use the single box above" (the legacy
+  /// freeform path). A later edit to reviewFields.ts never retroactively changes an already-submitted request.
+  stampPositions     Json?     @map("stamp_positions")
   body               String
   status             String    @default("OPEN") // OPEN|ACCEPTED|DISMISSED (CHECK in SQL)
   resolvedById       String?   @map("resolved_by_id") @db.Uuid

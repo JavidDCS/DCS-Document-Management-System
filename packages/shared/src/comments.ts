@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ReviewFieldOption } from './reviewFields.js';
 
 export const REVIEW_COMMENT_STATUSES = ['OPEN', 'ACCEPTED', 'DISMISSED'] as const;
 export type ReviewCommentStatus = (typeof REVIEW_COMMENT_STATUSES)[number];
@@ -56,6 +57,18 @@ export type CreateReviewCommentInput = z.output<typeof createReviewCommentSchema
 export const createReviewCommentsBatchSchema = z.strictObject({ items: z.array(createReviewCommentSchema).min(1).max(20) });
 export type CreateReviewCommentsBatchInput = z.output<typeof createReviewCommentsBatchSchema>;
 
+/** One fixed named field's value (e.g. "Counterparty Legal Name"), as opposed to a client-drawn freeform box --
+ * the client never supplies a position; the server resolves `fieldKey` against reviewFields.ts on its own. */
+export const submitReviewFieldSchema = z.strictObject({
+  fieldKey: z.string().trim().min(1).max(100),
+  value: z.string().trim().min(1).max(MAX_CHANGE_TEXT),
+});
+export type SubmitReviewFieldInput = z.output<typeof submitReviewFieldSchema>;
+
+/** Several fields filled in and sent together -- same "queue locally, send once" shape as createReviewCommentsBatchSchema. */
+export const submitReviewFieldsBatchSchema = z.strictObject({ items: z.array(submitReviewFieldSchema).min(1).max(20) });
+export type SubmitReviewFieldsBatchInput = z.output<typeof submitReviewFieldsBatchSchema>;
+
 export const reviewCommentDecisionSchema = z.strictObject({
   resolutionNote: z.string().trim().max(500).optional(),
   /** Accept only: staff's own wording, used instead of the client's `replacementText` when the PDF is written.
@@ -106,6 +119,9 @@ export interface ReviewCommentDto {
   boxHPct: number | null;
   originalText: string | null;
   replacementText: string | null;
+  /** Set when this came from the fixed named-field form (reviewFields.ts); null for the freeform/legacy path
+   * and for the 1% fallback COMMENT. Used only to show the field's label instead of a generic "Suggested change". */
+  fieldKey: string | null;
   /** Set only if staff adjusted the wording at accept time; when present, this is what was (or will be) written
    * into the PDF -- never `replacementText` directly once this is set. */
   editedReplacementText: string | null;
@@ -140,6 +156,9 @@ export interface PublicReviewLinkInfo {
   expiresAt: string;
   status: 'ACTIVE' | 'EXPIRED' | 'CONSUMED' | 'REVOKED';
   comments: ReviewCommentDto[];
+  /** The fixed named fields available for this document's type (reviewFields.ts), labels/placeholders only --
+   * never positions. Empty for a document type with no configured fields (the 1% free-text fallback still works). */
+  editableFields: ReviewFieldOption[];
 }
 
 export interface SignatureAssetDto {

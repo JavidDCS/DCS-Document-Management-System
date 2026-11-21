@@ -11,6 +11,13 @@ import { Badge, ConfirmDialog, ErrorBanner, InfoBanner, Spinner, cn } from './ui
 
 const STIRLING_PDF_URL = (import.meta.env.VITE_STIRLING_PDF_URL as string | undefined)?.trim();
 
+/** A fixed field's key (e.g. "counterparty_legal_name") shown as a person would write it ("Counterparty Legal
+ * Name"), without duplicating reviewFields.ts's own labels here -- this is cosmetic only, so a plain humanization
+ * of the key is enough and never goes stale if the server-side config's wording changes. */
+function fieldLabel(key: string): string {
+  return key.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
 const STATUS_TONE: Record<ReviewCommentDto['status'], 'warn' | 'ok' | 'neutral'> = { OPEN: 'warn', ACCEPTED: 'ok', DISMISSED: 'neutral' };
 const LINK_STATUS_TONE: Record<ShareLinkStatus, 'warn' | 'ok' | 'neutral' | 'bad'> = {
   SENT: 'neutral',
@@ -247,15 +254,19 @@ export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
     }
   }
 
-  const decide = (id: string, action: 'accept' | 'dismiss') =>
-    run(id, () => api.post(`/review-comments/${id}/${action}`), action === 'accept' ? 'Accepted' : 'Dismissed');
+  // Accepting the last open item writes it into the PDF immediately (see acceptComment's auto-apply) -- so the
+  // toast tells staff that already happened instead of implying a separate step is still needed.
+  const decide = (id: string, action: 'accept' | 'dismiss') => {
+    const wasLastOpen = action === 'accept' && openCount === 1;
+    return run(id, () => api.post(`/review-comments/${id}/${action}`), action === 'accept' ? (wasLastOpen ? 'Accepted -- the document was updated automatically' : 'Accepted') : 'Dismissed');
+  };
 
   // "What now?" -- the one line a person needs, in the order the work actually happens.
   let next: string;
   if (links.length === 0) next = 'Step 1: email the document to the client for review.';
   else if (list.length === 0) next = 'Waiting for the client. You will get an email as soon as they comment.';
-  else if (openCount > 0) next = `Step 2: accept or dismiss each of the ${openCount} open comment${openCount === 1 ? '' : 's'}.`;
-  else next = 'Step 3: prepare the modified PDF (e.g. in Stirling-PDF) and send it to the client below.';
+  else if (openCount > 0) next = `Step 2: accept or dismiss each of the ${openCount} open comment${openCount === 1 ? '' : 's'}. Accepting the last one updates the document automatically.`;
+  else next = 'Done -- any accepted changes were written into the document automatically. Send it to the client, or use the PDF editor below for anything unusual.';
 
   return (
     <div className="card">
@@ -305,7 +316,7 @@ export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
               <div key={c.id} className={cn('rounded-lg border p-3 text-sm', selected === c.id && 'border-primary')} onClick={() => setSelected(c.id)}>
                 <div className="flex items-center justify-between gap-2">
                   <span className="muted text-xs">
-                    {c.kind === 'CHANGE' ? 'Suggested change' : 'Comment'} · page {c.pageNumber}
+                    {c.kind === 'CHANGE' ? (c.fieldKey ? fieldLabel(c.fieldKey) : 'Suggested change') : `Comment · page ${c.pageNumber}`}
                   </span>
                   <span className="row gap-1">
                     {c.applied && <Badge tone="ok">Applied</Badge>}
@@ -313,7 +324,15 @@ export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
                   </span>
                 </div>
                 {/* Plain text only: a client's comment is attacker-controlled input, never rendered as HTML. */}
-                {c.kind === 'CHANGE' ? (
+                {c.kind === 'CHANGE' && c.fieldKey ? (
+                  <p className="mb-0 mt-1">
+                    <strong>{c.editedReplacementText ?? c.replacementText}</strong>
+                    {c.editedReplacementText && c.editedReplacementText !== c.replacementText && (
+                      <span className="muted text-xs"> (client wrote "{c.replacementText}")</span>
+                    )}
+                  </p>
+                ) : null}
+                {c.kind === 'CHANGE' && !c.fieldKey ? (
                   <p className="mb-0 mt-1">
                     {c.originalText ? <span className="line-through">{c.originalText}</span> : <span className="muted">(text inside the box)</span>}
                     {' → '}
@@ -323,7 +342,7 @@ export function CommentsReviewPanel({ doc }: { doc: DocumentDetail }) {
                     )}
                   </p>
                 ) : null}
-                {c.kind === 'COMMENT' || !c.body.startsWith('Change ') ? <p className="mb-0 mt-1 whitespace-pre-wrap">{c.body}</p> : null}
+                {c.kind === 'COMMENT' ? <p className="mb-0 mt-1 whitespace-pre-wrap">{c.body}</p> : null}
                 {c.status === 'OPEN' && (
                   <div className="row mt-2">
                     <button type="button" className="btn small" disabled={busy !== null} onClick={(e) => { e.stopPropagation(); decide(c.id, 'dismiss'); }}>Dismiss</button>

@@ -12,10 +12,12 @@ import {
   type ReviewCommentDto,
   type ReviewCommentKind,
   type ReviewCommentStatus,
+  type ReviewFieldOption,
   type Role,
   type SendInput,
   type ShareLinkDto,
   type ShareLinkStatus,
+  type SubmitReviewFieldInput,
 } from '@dcs-docs/shared';
 import type { AuthContext } from '../../types/express.js';
 import { HttpError } from '../../utils/httpError.js';
@@ -38,7 +40,8 @@ import { generateRefreshToken, hashToken } from '../identity/tokens.js';
 import { enqueueJob, type JobContext } from '../jobs/jobs.js';
 import type { FileService } from '../storage/fileService.js';
 import type { StirlingPdfProvider } from '../../providers/pdf/stirlingPdf.js';
-import { applyReplacements, pageCount, stamp, UnsupportedTextError } from './pdfStamp.service.js';
+import { applyReplacements, pageCount, stamp, UnsupportedTextError, type TextReplacement } from './pdfStamp.service.js';
+import { reviewFieldFor, reviewFieldsFor, type ReviewFieldPosition } from './reviewFields.js';
 
 export interface RequestMeta {
   ip: string | null;
@@ -109,6 +112,8 @@ type CommentRow = {
   originalText: string | null;
   replacementText: string | null;
   editedReplacementText: string | null;
+  fieldKey: string | null;
+  stampPositions: Prisma.JsonValue | null;
   resultingVersionId: string | null;
   body: string;
   status: string;
@@ -177,6 +182,7 @@ export class ReviewService {
       boxHPct: c.boxHPct,
       originalText: c.originalText,
       replacementText: c.replacementText,
+      fieldKey: c.fieldKey,
       editedReplacementText: c.editedReplacementText,
       applied: c.kind === 'CHANGE' && c.resultingVersionId !== null,
       body: c.body,
@@ -319,6 +325,14 @@ export class ReviewService {
     return typeof s === 'string' ? s : null;
   }
 
+  /** True once a signature is already on this version -- stamped on its own (SOURCE_SIGNATURE) or as part of a
+   * combined incorporate that included one. Checked before stamping again so the image is never drawn twice. */
+  private alreadySigned(v: DocumentVersion): boolean {
+    const src = this.versionSource(v);
+    if (src === SOURCE_SIGNATURE) return true;
+    return src === SOURCE_INCORPORATE && Boolean((v.scanDetails as { signatureAssetId?: unknown } | null)?.signatureAssetId);
+  }
+
   /** A PDF a person has a review open against is only a safe base for new edits while nothing else was uploaded since. */
   private assertDerivedFromReviewed(base: DocumentVersion, reviewedVersionId: string): void {
     const src = this.versionSource(base);
@@ -382,16 +396,17 @@ export class ReviewService {
     }
   }
 
-  /** Accept = "yes, make this change". It records the decision only; the PDF is written later, in one go, by
-   * applyChanges/incorporateChanges, which use `editedReplacementText` over the client's own `replacementText`
-   * whenever staff supplied one here -- the client's original submission is never overwritten. */
+  /** Accept = "yes, make this change". Once every comment on the link is answered, any accepted, not-yet-applied
+   * CHANGE is written into the PDF immediately, in this same call (reusing incorporateChanges) -- no separate
+   * "Incorporate Changes" click for the standard case. `editedReplacementText` lets staff adjust the wording
+   * written to the PDF without ever overwriting the client's own submission. */
   async acceptComment(
     actor: AuthContext,
     commentId: string,
     input: { resolutionNote?: string | undefined; editedReplacementText?: string | undefined },
     meta: RequestMeta
   ): Promise<ReviewCommentDto> {
-    const comment = await this.db.documentReviewComment.findUnique({ where: { id: commentId } });
+    const comment = await this.db.documentReviewComment.findUnique({ where: { id: commentId }, include: { shareLink: { select: { documentId: true } } } });
     if (!comment || comment.status !== 'OPEN') throw new HttpError(404, 'Comment not found');
     if (input.editedReplacementText !== undefined && comment.kind !== 'CHANGE') {
       throw new HttpError(400, 'Only a suggested change can have its wording edited', 'VALIDATION_ERROR', [{ path: 'editedReplacementText', message: 'Only a CHANGE comment can carry this field' }]);
@@ -415,6 +430,12 @@ export class ReviewService {
       });
       return c;
     });
+
+    const stillOpen = await this.db.documentReviewComment.count({ where: { shareLinkId: comment.shareLinkId, status: 'OPEN' } });
+    if (stillOpen === 0) {
+      const pending = await this.db.documentReviewComment.count({ where: { shareLinkId: comment.shareLinkId, kind: 'CHANGE', status: 'ACCEPTED', resultingVersionId: null } });
+      if (pending > 0) await this.incorporateChanges(actor, comment.shareLink.documentId, { shareLinkId: comment.shareLinkId }, meta);
+    }
     return this.toCommentDto(updated);
   }
 
@@ -440,6 +461,31 @@ export class ReviewService {
   // ------------------------------------------------------------------ internal: write the result into the PDF
 
   /**
+   * One accepted comment becomes one `TextReplacement` for a legacy freeform box, or several when it carries
+   * `stampPositions` (a fixed named field that appears more than once in the document, e.g. the counterparty's
+   * name in both the intro paragraph and the signing block). A position's own `template` has its `{{fieldKey}}`
+   * token substituted with the value; a position with no template just draws the value as-is.
+   */
+  private toTextReplacements(
+    comments: readonly Pick<CommentRow, 'pageNumber' | 'xPct' | 'yPct' | 'boxWPct' | 'boxHPct' | 'replacementText' | 'editedReplacementText' | 'fieldKey' | 'stampPositions'>[]
+  ): TextReplacement[] {
+    const out: TextReplacement[] = [];
+    for (const c of comments) {
+      const value = c.editedReplacementText ?? c.replacementText ?? '';
+      const positions = Array.isArray(c.stampPositions) ? (c.stampPositions as unknown as ReviewFieldPosition[]) : null;
+      if (positions && positions.length > 0 && c.fieldKey) {
+        for (const p of positions) {
+          const text = p.template ? p.template.replace(`{{${c.fieldKey}}}`, value) : value;
+          out.push({ pageNumber: p.pageNumber, xPct: p.xPct, yPct: p.yPct, wPct: p.wPct, hPct: p.hPct, text });
+        }
+      } else {
+        out.push({ pageNumber: c.pageNumber, xPct: c.xPct, yPct: c.yPct, wPct: c.boxWPct ?? 0, hPct: c.boxHPct ?? 0, text: value });
+      }
+    }
+    return out;
+  }
+
+  /**
    * Step 4a. Writes every ACCEPTED, not-yet-applied suggested change of one link into the PDF as a new version
    * (each box whited out and the new text drawn in). All comments on the link must be answered first, so a round is
    * never applied half-way.
@@ -463,10 +509,7 @@ export class ReviewService {
     const pdfBytes = await this.readVersionBytes(base);
     let edited: Buffer;
     try {
-      edited = await applyReplacements(
-        pdfBytes,
-        pending.map((c) => ({ pageNumber: c.pageNumber, xPct: c.xPct, yPct: c.yPct, wPct: c.boxWPct ?? 0, hPct: c.boxHPct ?? 0, text: c.editedReplacementText ?? c.replacementText ?? '' }))
-      );
+      edited = await applyReplacements(pdfBytes, this.toTextReplacements(pending));
     } catch (err) {
       if (err instanceof UnsupportedTextError) {
         throw new HttpError(400, `${err.message}. Dismiss that change or ask the client for plain letters and numbers.`, 'VALIDATION_ERROR');
@@ -496,7 +539,7 @@ export class ReviewService {
    */
   async stampSignature(actor: AuthContext, documentId: string, input: { signatureAssetId?: string | undefined }, meta: RequestMeta): Promise<{ versionId: string; versionNumber: number }> {
     const base = await this.loadCurrentVersion(documentId);
-    if (this.versionSource(base) === SOURCE_SIGNATURE) throw new HttpError(409, 'This version already carries the signature', 'CONFLICT');
+    if (this.alreadySigned(base)) throw new HttpError(409, 'This version already carries the signature', 'CONFLICT');
 
     const waiting = await this.db.documentReviewComment.count({ where: { kind: 'CHANGE', status: 'ACCEPTED', resultingVersionId: null, shareLink: { documentId } } });
     if (waiting > 0) throw new HttpError(409, `Apply the ${waiting} accepted change${waiting === 1 ? '' : 's'} first: the signature goes on last`, 'CONFLICT');
@@ -561,10 +604,7 @@ export class ReviewService {
     const pdfBytes = await this.readVersionBytes(base);
     let edited: Buffer;
     try {
-      edited = await applyReplacements(
-        pdfBytes,
-        pending.map((c) => ({ pageNumber: c.pageNumber, xPct: c.xPct, yPct: c.yPct, wPct: c.boxWPct ?? 0, hPct: c.boxHPct ?? 0, text: c.editedReplacementText ?? c.replacementText ?? '' }))
-      );
+      edited = await applyReplacements(pdfBytes, this.toTextReplacements(pending));
     } catch (err) {
       if (err instanceof UnsupportedTextError) {
         throw new HttpError(400, `${err.message}. Dismiss that change or ask the client for plain letters and numbers.`, 'VALIDATION_ERROR');
@@ -650,7 +690,10 @@ export class ReviewService {
    */
   private async loadActiveLinkByToken(token: string) {
     const tokenHash = hashToken(token);
-    const link = await this.db.documentShareLink.findUnique({ where: { tokenHash }, include: { document: { select: { id: true, name: true } }, version: true } });
+    const link = await this.db.documentShareLink.findUnique({
+      where: { tokenHash },
+      include: { document: { select: { id: true, name: true, documentType: { select: { reviewFieldsConfig: true } } } }, version: true },
+    });
     if (!link || !USABLE_LINK_STATUSES.has(link.status) || link.expiresAt.getTime() < Date.now()) {
       throw new HttpError(404, 'Review link not found', 'NOT_FOUND');
     }
@@ -684,6 +727,7 @@ export class ReviewService {
       expiresAt: link.expiresAt.toISOString(),
       status: 'ACTIVE',
       comments: comments.map((c) => this.toCommentDto(c)),
+      editableFields: reviewFieldsFor(link.document.documentType.reviewFieldsConfig).map((f) => ({ key: f.key, label: f.label, placeholder: f.placeholder })),
     };
   }
 
@@ -765,6 +809,63 @@ export class ReviewService {
       if (link.status !== 'COMMENTED') await tx.documentShareLink.update({ where: { id: link.id }, data: { status: 'COMMENTED' } });
       const ids = rows.map((r) => r.id);
       await enqueueJob(tx, { type: 'notify_review_comment', payload: { commentIds: ids }, dedupeKey: `notify-review-comments:${ids.join(',')}` });
+      return rows;
+    });
+    return created.map((c) => this.toCommentDto(c));
+  }
+
+  /**
+   * The fixed named-field counterpart to submitComments: the client never supplies a position, only `fieldKey` +
+   * `value` -- the server resolves each key against reviewFields.ts (snapshotting the resolved positions onto the
+   * row as `stampPositions`, so a later edit to reviewFields.ts never changes what an already-submitted request
+   * stamps) and 400s on a key this document's type doesn't have. Same "queue locally, one notification" batch
+   * shape as submitComments.
+   */
+  async submitReviewFields(token: string, items: readonly SubmitReviewFieldInput[], meta: RequestMeta): Promise<ReviewCommentDto[]> {
+    const link = await this.loadActiveLinkByToken(token);
+    const existing = await this.db.documentReviewComment.count({ where: { shareLinkId: link.id } });
+    if (existing + items.length > MAX_COMMENTS_PER_LINK) {
+      throw new HttpError(409, 'This review link has reached its limit of comments. Please contact the sender.', 'CONFLICT');
+    }
+
+    const resolved = items.map((item) => {
+      const field = reviewFieldFor(link.document.documentType.reviewFieldsConfig, item.fieldKey);
+      if (!field) throw new HttpError(400, `Unknown field "${item.fieldKey}"`, 'VALIDATION_ERROR', [{ path: 'fieldKey', message: 'Unknown field' }]);
+      const first = field.positions[0];
+      if (!first) throw new HttpError(500, `Field "${field.key}" has no configured position`, 'INTERNAL_ERROR');
+      return { field, first, value: item.value };
+    });
+
+    const created = await this.db.$transaction(async (tx) => {
+      const rows: CommentRow[] = [];
+      for (const { field, first, value } of resolved) {
+        const c = await tx.documentReviewComment.create({
+          data: {
+            shareLinkId: link.id,
+            kind: 'CHANGE',
+            fieldKey: field.key,
+            pageNumber: first.pageNumber,
+            xPct: first.xPct,
+            yPct: first.yPct,
+            boxWPct: first.wPct,
+            boxHPct: first.hPct,
+            stampPositions: field.positions as unknown as Prisma.InputJsonValue,
+            replacementText: value,
+            body: `Change ${field.label} to "${value}"`,
+            clientIp: meta.ip,
+            userAgent: meta.userAgent,
+          },
+          include: { resolvedBy: { select: { id: true, name: true } } },
+        });
+        rows.push(c);
+        await recordAudit(tx, {
+          actorType: 'EXTERNAL', action: 'REVIEW_COMMENT_SUBMITTED', resourceType: 'document_review_comment', resourceId: c.id,
+          ip: meta.ip, userAgent: meta.userAgent, requestId: meta.requestId, details: { shareLinkId: link.id, documentId: link.documentId, kind: 'CHANGE', fieldKey: field.key },
+        });
+      }
+      if (link.status !== 'COMMENTED') await tx.documentShareLink.update({ where: { id: link.id }, data: { status: 'COMMENTED' } });
+      const ids = rows.map((r) => r.id);
+      await enqueueJob(tx, { type: 'notify_review_comment', payload: { commentIds: ids }, dedupeKey: `notify-review-fields:${ids.join(',')}` });
       return rows;
     });
     return created.map((c) => this.toCommentDto(c));

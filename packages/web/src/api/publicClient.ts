@@ -1,4 +1,4 @@
-import type { CreateReviewCommentInput, PublicReviewLinkInfo, ReviewCommentDto } from '@dcs-docs/shared';
+import type { CreateReviewCommentInput, PublicReviewLinkInfo, ReviewCommentDto, SubmitReviewFieldInput } from '@dcs-docs/shared';
 import { ApiError, toApiError } from './client';
 
 /**
@@ -79,6 +79,29 @@ export async function submitComments(token: string, items: CreateReviewCommentIn
   async function attempt(forceCsrf: boolean): Promise<ReviewCommentDto[]> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-CSRF-Token': await getCsrf(forceCsrf) };
     const res = await fetch(`/api/v1/public/review/${encodeURIComponent(token)}/comments/batch`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers,
+      body: JSON.stringify({ items }),
+    });
+    return parseJson<ReviewCommentDto[]>(res);
+  }
+  try {
+    return await attempt(false);
+  } catch (e) {
+    if (e instanceof ApiError && e.code === 'CSRF_FAILED') {
+      csrfToken = null;
+      return attempt(true);
+    }
+    throw e;
+  }
+}
+
+/** The fixed named-field counterpart to submitComments: same one-request, one-notification batch shape. */
+export async function submitReviewFields(token: string, items: SubmitReviewFieldInput[]): Promise<ReviewCommentDto[]> {
+  async function attempt(forceCsrf: boolean): Promise<ReviewCommentDto[]> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-CSRF-Token': await getCsrf(forceCsrf) };
+    const res = await fetch(`/api/v1/public/review/${encodeURIComponent(token)}/fields`, {
       method: 'POST',
       credentials: 'same-origin',
       headers,

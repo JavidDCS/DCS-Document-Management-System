@@ -8,5 +8,6 @@ export * from './metadata.js';
 export * from './documents.js';
 export * from './email.js';
 export * from './comments.js';
+export * from './reviewFields.js';
 export * from './integrations.js';
 export * from './friendlyError.js';

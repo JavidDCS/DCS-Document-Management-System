@@ -14,6 +14,9 @@ coverage/
 /storage/
 /quarantine/
 
+# reference NDA/Mandate/Affiliate/Referral templates for this work -- never real app data, never committed
+/pdf/
+
 .DS_Store
 Thumbs.db
 *.log
