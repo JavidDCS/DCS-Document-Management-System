@@ -7,6 +7,7 @@ import type { StorageProvider } from '../../src/providers/storage/types.js';
 import type { EmailProvider } from '../../src/providers/email/types.js';
 import type { GoogleOidcProvider } from '../../src/providers/identity/googleOidc.js';
 import type { StirlingPdfProvider } from '../../src/providers/pdf/stirlingPdf.js';
+import type { DocxToPdfConverter } from '../../src/providers/pdf/docxToPdf.js';
 import { FakeScanner } from './storage.js';
 import type { PrismaClient } from '@prisma/client';
 import request from 'supertest';
@@ -55,6 +56,7 @@ export interface TestDeps {
   emailProvider?: EmailProvider;
   googleProvider?: GoogleOidcProvider;
   stirlingPdf?: StirlingPdfProvider;
+  docxConverter?: DocxToPdfConverter;
 }
 
 export function buildFullApp(prisma: PrismaClient, overrides: Partial<ServicesConfig> = {}, deps: TestDeps = {}) {
@@ -66,6 +68,7 @@ export function buildFullApp(prisma: PrismaClient, overrides: Partial<ServicesCo
     ...(deps.emailProvider ? { emailProvider: deps.emailProvider } : {}),
     ...(deps.googleProvider ? { googleProvider: deps.googleProvider } : {}),
     ...(deps.stirlingPdf ? { stirlingPdf: deps.stirlingPdf } : {}),
+    ...(deps.docxConverter ? { docxConverter: deps.docxConverter } : {}),
   });
   const app = createApp({
     config: cfg,

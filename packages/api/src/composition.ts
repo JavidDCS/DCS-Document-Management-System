@@ -38,6 +38,9 @@ import { GmailProvider } from './providers/email/gmail.js';
 import type { EmailProvider } from './providers/email/types.js';
 import { GoogleOidcProvider } from './providers/identity/googleOidc.js';
 import { StirlingPdfProvider } from './providers/pdf/stirlingPdf.js';
+import { createDocxConverter, type DocxToPdfConverter } from './providers/pdf/docxToPdf.js';
+import { DocumentTemplateService } from './modules/review/documentTemplate.service.js';
+import { registerDocumentTemplateRoutes } from './modules/review/documentTemplate.routes.js';
 import { EnvKeyProvider, decodeMasterKey, parseKeyList } from './providers/keys/envKeyProvider.js';
 import { createStorageProvider, type StorageEnv } from './providers/storage/factory.js';
 
@@ -74,6 +77,9 @@ export type ServicesConfig = AppConfig &
     EMAIL_TEST_MODE_ALLOWLIST?: string[] | undefined;
     STIRLING_PDF_URL?: string | undefined;
     STIRLING_PDF_API_KEY?: string | undefined;
+    DOCX_PDF_CONVERTER?: 'stirling' | 'libreoffice' | undefined;
+    LIBREOFFICE_BIN?: string | undefined;
+    DOCX_CONVERT_TIMEOUT_MS?: number | undefined;
   };
 
 export interface ServiceDeps {
@@ -84,6 +90,8 @@ export interface ServiceDeps {
   emailProvider?: EmailProvider;
   googleProvider?: GoogleOidcProvider;
   stirlingPdf?: StirlingPdfProvider;
+  /** Overridable in tests; by default the converter named by DOCX_PDF_CONVERTER in .env (none when unset). */
+  docxConverter?: DocxToPdfConverter;
 }
 
 /** The composition root: the only place that wires concrete services together. */
@@ -116,7 +124,9 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
 
   const stirlingPdf = deps.stirlingPdf ?? new StirlingPdfProvider({ url: cfg.STIRLING_PDF_URL, apiKey: cfg.STIRLING_PDF_API_KEY });
   const reviewConfig: ReviewConfig = { APP_PUBLIC_URL: publicUrl, STORAGE_MAX_FILE_SIZE_MB: cfg.STORAGE_MAX_FILE_SIZE_MB };
-  const review = new ReviewService(db, deps.files, documents, email, emailConnections, stirlingPdf, reviewConfig);
+  const docxConverter = deps.docxConverter ?? createDocxConverter({ DOCX_PDF_CONVERTER: cfg.DOCX_PDF_CONVERTER, LIBREOFFICE_BIN: cfg.LIBREOFFICE_BIN ?? 'soffice', DOCX_CONVERT_TIMEOUT_MS: cfg.DOCX_CONVERT_TIMEOUT_MS ?? 60_000, STIRLING_PDF_URL: cfg.STIRLING_PDF_URL, STIRLING_PDF_API_KEY: cfg.STIRLING_PDF_API_KEY });
+  const documentTemplates = new DocumentTemplateService(db, deps.files, docxConverter);
+  const review = new ReviewService(db, deps.files, documents, email, emailConnections, stirlingPdf, documentTemplates, reviewConfig);
   const signatureAssets = new SignatureAssetsService(db, deps.files);
 
   users.onDeactivate(async (tx, userId) => {
@@ -157,6 +167,7 @@ export function buildServices(db: PrismaClient, cfg: ServicesConfig, deps: Servi
     emailProvider,
     googleProvider,
     review,
+    documentTemplates,
     signatureAssets,
     integrations,
   };
@@ -195,6 +206,7 @@ export function registerRoutes(secure: SecureRouter, ctx: AppContext, svc: Servi
   registerAuditRoutes(secure, ctx, svc.db);
   registerReportsRoutes(secure, ctx, svc.db);
   registerReviewRoutes(secure, ctx, svc.review);
+  registerDocumentTemplateRoutes(secure, ctx, svc.documentTemplates);
   registerSignatureAssetRoutes(secure, ctx, svc.signatureAssets, svc.files, cfg.STORAGE_MAX_FILE_SIZE_MB * 1024 * 1024);
 }
 

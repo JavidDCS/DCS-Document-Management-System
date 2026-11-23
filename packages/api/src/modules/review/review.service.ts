@@ -40,6 +40,7 @@ import { generateRefreshToken, hashToken } from '../identity/tokens.js';
 import { enqueueJob, type JobContext } from '../jobs/jobs.js';
 import type { FileService } from '../storage/fileService.js';
 import type { StirlingPdfProvider } from '../../providers/pdf/stirlingPdf.js';
+import type { DocumentTemplateService } from './documentTemplate.service.js';
 import { applyReplacements, pageCount, stamp, UnsupportedTextError, type TextReplacement } from './pdfStamp.service.js';
 import { reviewFieldFor, reviewFieldsFor, type ReviewFieldPosition } from './reviewFields.js';
 
@@ -143,6 +144,7 @@ export class ReviewService {
     private readonly email: EmailService,
     private readonly connections: EmailConnectionsService,
     private readonly stirlingPdf: StirlingPdfProvider,
+    private readonly templates: DocumentTemplateService,
     cfg: ReviewConfig
   ) {
     this.publicUrl = cfg.APP_PUBLIC_URL.replace(/\/+$/, '');
@@ -486,6 +488,42 @@ export class ReviewService {
   }
 
   /**
+   * The document with the accepted changes in it. A document that has a Word template is made again from that template: every
+   * blank filled with the client's latest value for it (from every accepted round, not only this one), then turned into a PDF, so the
+   * new words have the same font, size and spacing as the rest of the agreement. A document with no Word template falls back to the
+   * older way: a white box painted over the PDF with the new text on top.
+   */
+  private async buildEditedPdf(
+    documentId: string,
+    pdfBytes: Buffer,
+    pending: readonly Pick<CommentRow, 'pageNumber' | 'xPct' | 'yPct' | 'boxWPct' | 'boxHPct' | 'replacementText' | 'editedReplacementText' | 'fieldKey' | 'stampPositions'>[]
+  ): Promise<Buffer> {
+    if (await this.templates.has(documentId)) {
+      const accepted = await this.db.documentReviewComment.findMany({
+        where: { kind: 'CHANGE', status: 'ACCEPTED', fieldKey: { not: null }, shareLink: { documentId } },
+        orderBy: { createdAt: 'asc' },
+        select: { fieldKey: true, replacementText: true, editedReplacementText: true },
+      });
+      const values: Record<string, string> = {};
+      for (const c of accepted) {
+        const v = c.editedReplacementText ?? c.replacementText;
+        if (c.fieldKey && v !== null && v !== undefined && v.trim() !== '') values[c.fieldKey] = v; // the latest accepted answer wins
+      }
+      const made = await this.templates.renderPdf(documentId, values);
+      if (made) return made;
+    }
+    try {
+      return await applyReplacements(pdfBytes, this.toTextReplacements(pending));
+    } catch (err) {
+      if (err instanceof UnsupportedTextError) {
+        throw new HttpError(400, `${err.message}. Dismiss that change or ask the client for plain letters and numbers.`, 'VALIDATION_ERROR');
+      }
+      if (err instanceof RangeError) throw new HttpError(409, 'One of the changes points at a page this document does not have', 'CONFLICT');
+      throw err;
+    }
+  }
+
+  /**
    * Step 4a. Writes every ACCEPTED, not-yet-applied suggested change of one link into the PDF as a new version
    * (each box whited out and the new text drawn in). All comments on the link must be answered first, so a round is
    * never applied half-way.
@@ -507,16 +545,7 @@ export class ReviewService {
     this.assertDerivedFromReviewed(base, link.versionId);
 
     const pdfBytes = await this.readVersionBytes(base);
-    let edited: Buffer;
-    try {
-      edited = await applyReplacements(pdfBytes, this.toTextReplacements(pending));
-    } catch (err) {
-      if (err instanceof UnsupportedTextError) {
-        throw new HttpError(400, `${err.message}. Dismiss that change or ask the client for plain letters and numbers.`, 'VALIDATION_ERROR');
-      }
-      if (err instanceof RangeError) throw new HttpError(409, 'One of the changes points at a page this document does not have', 'CONFLICT');
-      throw err;
-    }
+    const edited = await this.buildEditedPdf(documentId, pdfBytes, pending);
 
     const ids = pending.map((c) => c.id);
     const done = await this.commitDerivedVersion({
@@ -602,16 +631,7 @@ export class ReviewService {
     this.assertDerivedFromReviewed(base, link.versionId);
 
     const pdfBytes = await this.readVersionBytes(base);
-    let edited: Buffer;
-    try {
-      edited = await applyReplacements(pdfBytes, this.toTextReplacements(pending));
-    } catch (err) {
-      if (err instanceof UnsupportedTextError) {
-        throw new HttpError(400, `${err.message}. Dismiss that change or ask the client for plain letters and numbers.`, 'VALIDATION_ERROR');
-      }
-      if (err instanceof RangeError) throw new HttpError(409, 'One of the changes points at a page this document does not have', 'CONFLICT');
-      throw err;
-    }
+    const edited = await this.buildEditedPdf(documentId, pdfBytes, pending);
 
     let finalBytes = edited;
     if (signature) {
@@ -828,11 +848,13 @@ export class ReviewService {
       throw new HttpError(409, 'This review link has reached its limit of comments. Please contact the sender.', 'CONFLICT');
     }
 
+    // A document with a Word template fills its own {{blanks}}, so its fields need no painting position at all.
+    const hasTemplate = await this.templates.has(link.documentId);
     const resolved = items.map((item) => {
       const field = reviewFieldFor(link.document.documentType.reviewFieldsConfig, item.fieldKey);
       if (!field) throw new HttpError(400, `Unknown field "${item.fieldKey}"`, 'VALIDATION_ERROR', [{ path: 'fieldKey', message: 'Unknown field' }]);
-      const first = field.positions[0];
-      if (!first) throw new HttpError(500, `Field "${field.key}" has no configured position`, 'INTERNAL_ERROR');
+      const first = field.positions[0] ?? null;
+      if (!first && !hasTemplate) throw new HttpError(500, `The field "${field.key}" is not set up yet: it needs a Word template or a position in the PDF. Ask the administrator.`, 'INTERNAL_ERROR');
       return { field, first, value: item.value };
     });
 
@@ -844,11 +866,10 @@ export class ReviewService {
             shareLinkId: link.id,
             kind: 'CHANGE',
             fieldKey: field.key,
-            pageNumber: first.pageNumber,
-            xPct: first.xPct,
-            yPct: first.yPct,
-            boxWPct: first.wPct,
-            boxHPct: first.hPct,
+            pageNumber: first?.pageNumber ?? 1,
+            xPct: first?.xPct ?? 0,
+            yPct: first?.yPct ?? 0,
+            ...(first ? { boxWPct: first.wPct, boxHPct: first.hPct } : {}),
             stampPositions: field.positions as unknown as Prisma.InputJsonValue,
             replacementText: value,
             body: `Change ${field.label} to "${value}"`,

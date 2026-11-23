@@ -32,6 +32,7 @@
     "busboy": "1.6.0",
     "cookie-parser": "1.4.7",
     "cors": "2.8.6",
+    "docxtemplater": "3.71.1",
     "dotenv": "16.6.1",
     "express": "4.22.3",
     "express-rate-limit": "8.7.1",
@@ -40,6 +41,7 @@
     "jsonwebtoken": "9.0.3",
     "nodemailer": "10.2.1",
     "pdf-lib": "1.17.1",
+    "pizzip": "3.3.0",
     "zod": "4.6.7"
   },
   "devDependencies": {

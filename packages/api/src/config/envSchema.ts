@@ -258,6 +258,15 @@ export const envObject = z.object({
   // Personal API key for that instance (Settings > Preferences > API Keys), sent as X-API-KEY. The API uses this
   // to push the current version into Stirling-PDF's storage and create a share link. Unset: that upload route 503s.
   STIRLING_PDF_API_KEY: z.preprocess(blankToUndefined, z.string().min(1).optional()),
+
+  // Turning a filled Word agreement into a PDF. Unset: documents with a Word template cannot be produced and the older
+  // "paint over the PDF" way is used instead. 'stirling' uses STIRLING_PDF_URL + STIRLING_PDF_API_KEY above; 'libreoffice'
+  // runs LibreOffice installed on this server (no screen).
+  DOCX_PDF_CONVERTER: z.preprocess(blankToUndefined, z.enum(['stirling', 'libreoffice']).optional()),
+  // The LibreOffice program to run (a name on the PATH or a full path). Only read when DOCX_PDF_CONVERTER=libreoffice.
+  LIBREOFFICE_BIN: z.preprocess(blankToUndefined, z.string().min(1).default('soffice')),
+  // How long one conversion may take before it is given up, in milliseconds.
+  DOCX_CONVERT_TIMEOUT_MS: intInRange(5_000, 300_000, 60_000),
 });
 
 /** Cross-field rules. Production is stricter: these mistakes would silently weaken security, so the API refuses to start. */

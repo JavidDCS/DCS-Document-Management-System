@@ -10,6 +10,7 @@ import { useLoad } from '../hooks';
 import { fmtDateTime, saveBlob } from '../lib/format';
 import type { DocumentDetail } from '../types';
 import { PdfCanvasViewer } from './pdf/PdfCanvasViewer';
+import { ReviewTemplatePanel } from './ReviewTemplatePanel';
 import { Badge, ConfirmDialog, ErrorBanner, InfoBanner, Spinner, cn } from './ui';
 
 const STIRLING_PDF_URL = (import.meta.env.VITE_STIRLING_PDF_URL as string | undefined)?.trim();
@@ -295,6 +296,10 @@ export function CommentsReviewPanel({ doc, onReload }: { doc: DocumentDetail; on
 
       <InfoBanner>{next}</InfoBanner>
       <p className="muted mb-0 mt-1 text-xs">This page only shows what the client asked to change -- nothing here can be edited.</p>
+
+      <div className="my-4">
+        <ReviewTemplatePanel documentId={doc.id} />
+      </div>
 
       <div className="my-4">
         <SendForReviewForm doc={doc} onSent={shareLinks.reload} />

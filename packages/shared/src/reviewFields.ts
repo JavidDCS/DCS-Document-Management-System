@@ -32,11 +32,23 @@ export type ReviewFieldPosition = z.output<typeof reviewFieldPositionSchema>;
 /** One named field a client can fill in. `positions` lists every spot this field's value is stamped into -- a
  * value can appear more than once in the same document (e.g. a counterparty's name in both an intro paragraph
  * and a signing block). */
+/** How a value the client typed is tidied before it goes into the document. `name`: "joseph  kumar" becomes "Joseph Kumar";
+ * `title`: every word starts with a capital; `upper`: ALL CAPITALS; `date_ordinal`: "2026-03-19" becomes "19th of March, 2026";
+ * `none` (the default): the value is only trimmed. */
+export const REVIEW_FIELD_FORMATS = ['none', 'name', 'title', 'upper', 'date_ordinal'] as const;
+export type ReviewFieldFormat = (typeof REVIEW_FIELD_FORMATS)[number];
+
 export const reviewFieldDefSchema = z.strictObject({
   key: z.string().regex(/^[a-z][a-z0-9_]*$/, 'Use lower-case letters, digits and _, starting with a letter').max(100),
   label: z.string().trim().min(1).max(100),
   placeholder: z.string().trim().max(150).optional(),
-  positions: z.array(reviewFieldPositionSchema).min(1).max(10),
+  /** Spots to paint the value onto a PDF (the old whiteout way). Not needed for a document that has a Word template: there the value
+   * goes into the template's own {{key}} blank instead. */
+  positions: z.array(reviewFieldPositionSchema).max(10).default([]),
+  /** Tidying applied to the value before it is written into the document (see REVIEW_FIELD_FORMATS). */
+  format: z.enum(REVIEW_FIELD_FORMATS).optional(),
+  /** What goes into the blank when the client did not change this field (e.g. the template's own sample wording). */
+  defaultValue: z.string().trim().max(500).optional(),
 });
 export type ReviewFieldDef = z.output<typeof reviewFieldDefSchema>;
 

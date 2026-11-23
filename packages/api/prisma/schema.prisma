@@ -70,6 +70,7 @@ model User {
   shareLinksCreated       DocumentShareLink[]    @relation("ShareLinkCreator")
   reviewCommentsResolved  DocumentReviewComment[] @relation("ReviewCommentResolver")
   signatureAssetsCreated  SignatureAsset[]        @relation("SignatureAssetCreator")
+  documentTemplatesUploaded DocumentTemplate[]    @relation("DocumentTemplateUploader")
   integrationHandoffsUsed IntegrationHandoff[]    @relation("HandoffUsedBy")
 
   @@index([createdById])
@@ -263,6 +264,7 @@ model Document {
   accessRules    DocumentAccessRule[]
   attachedTo     EmailAttachment[]
   shareLinks     DocumentShareLink[]
+  template       DocumentTemplate?    @relation("DocumentTemplateOf")
   integrationHandoffs IntegrationHandoff[]
 
   @@index([documentTypeId])
@@ -631,4 +633,30 @@ model IntegrationHandoff {
   @@index([documentId])
   @@index([usedByUserId])
   @@map("integration_handoffs")
+}
+
+/// The Word (.docx) version of an agreement, with {{blanks}} for the changing parts. When a document has one, "Incorporate
+/// changes" fills the blanks and turns the Word file into a PDF (right font, right spacing) instead of painting over the PDF.
+/// Stored encrypted exactly like document content; one per document.
+model DocumentTemplate {
+  id              String   @id @default(uuid()) @db.Uuid
+  documentId      String   @unique @map("document_id") @db.Uuid
+  filename        String
+  storageKey      String   @unique @map("storage_key") @db.Uuid
+  sizeBytes       BigInt   @map("size_bytes")
+  storedSize      BigInt   @map("stored_size")
+  sha256          String   @db.Char(64)
+  encryptionKeyId String   @map("encryption_key_id")
+  wrappedDataKey  Bytes    @map("wrapped_data_key")
+  /// the {{blanks}} found in the file when it was uploaded
+  blanks          String[]
+  uploadedById    String   @map("uploaded_by_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  document   Document @relation("DocumentTemplateOf", fields: [documentId], references: [id], onDelete: Cascade)
+  uploadedBy User     @relation("DocumentTemplateUploader", fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  @@index([uploadedById])
+  @@map("document_templates")
 }
